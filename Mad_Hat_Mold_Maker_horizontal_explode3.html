@@ -623,7 +623,7 @@ async function generate(){
   for(let i=0;i<count;i++){
    status(`Finishing panel ${i+1}/${count}…`);await yieldUI();
    const mid=(i+.5)/count*Math.PI*2;
-   resultGeometries.push({name:`Mold_Panel_${String(i+1).padStart(2,'0')}`,geometry:panelGeometries[i],position:new THREE.Vector3(),rotation:new THREE.Euler(),color:palette[i%palette.length],explode:new THREE.Vector3(Math.sin(mid),.06,Math.cos(mid))});
+   resultGeometries.push({name:`Mold_Panel_${String(i+1).padStart(2,'0')}`,geometry:panelGeometries[i],position:new THREE.Vector3(),rotation:new THREE.Euler(),color:palette[i%palette.length],explode:new THREE.Vector3(Math.sin(mid),0,Math.cos(mid))});
   }
   moldParts=resultGeometries;generated=true;
   moldParts.forEach((p,i)=>{
