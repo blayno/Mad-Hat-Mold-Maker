@@ -496,6 +496,41 @@ function roundSideKeyGeometry(angle,radius,y,keyRadius=3,depth=12){
  g.computeBoundingSphere();
  return g;
 }
+function makeClipFlangeGeometry(profile, angle, yMin, yMax, clearance=0, wall=8, projection=12, thickness=3, tangentialOffset=0){
+  // Build the flange as a closed, contoured solid rather than a straight box.
+  // Its inner radial face tracks the panel's OUTER silhouette at every height,
+  // so it cannot protrude into a narrower section of the mold cavity.
+  const segments=48, verts=[], indices=[];
+  const tangentMin=tangentialOffset-thickness/2;
+  const tangentMax=tangentialOffset+thickness/2;
+  for(let j=0;j<=segments;j++){
+    const y=yMin+(yMax-yMin)*j/segments;
+    const wallRadius=profileRadius(profile,angle,THREE.MathUtils.clamp(y,0,profile.ys[profile.yCount]))+Math.max(0,clearance)+wall;
+    const innerRadius=wallRadius-0.25; // slight overlap into the wall for a reliable CSG union
+    const outerRadius=innerRadius+projection;
+    for(const [r,t] of [[innerRadius,tangentMin],[outerRadius,tangentMin],[outerRadius,tangentMax],[innerRadius,tangentMax]]){
+      verts.push(Math.sin(angle)*r+Math.cos(angle)*t,y,Math.cos(angle)*r-Math.sin(angle)*t);
+    }
+  }
+  const ring=(j,k)=>j*4+k;
+  // Connect the four longitudinal faces between each pair of height rings.
+  for(let j=0;j<segments;j++){
+    for(let k=0;k<4;k++){
+      const next=(k+1)%4, a=ring(j,k), b=ring(j,next), c=ring(j+1,next), d=ring(j+1,k);
+      indices.push(a,b,d,b,c,d);
+    }
+  }
+  // Close the bottom and top ends.
+  indices.push(ring(0,0),ring(0,2),ring(0,1),ring(0,0),ring(0,3),ring(0,2));
+  const top=ring(segments,0);
+  indices.push(top,top+1,top+2,top,top+2,top+3);
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
+  g.setIndex(indices);
+  g.computeVertexNormals();g.computeBoundingBox();g.computeBoundingSphere();
+  return g;
+}
+
 async function generate(){
  if(!sourceGeometry)return;
  clearGenerated();$('generate').disabled=true;
@@ -619,6 +654,29 @@ async function generate(){
     panelGeometries[receiver].dispose();pocket.dispose();panelGeometries[receiver]=cutPanel;
    }
   }
+  // Fuse external clip flanges onto both vertical edges of every panel.
+  // At each seam, neighbouring tabs shift in opposite tangential directions.
+  // Their centre-to-centre spacing equals exactly one flange thickness, so
+  // the two inner faces meet edge-to-edge without overlapping or leaving a gap.
+  const flangeProjection=12; // outward projection / clip-grip width (mm)
+  const flangeThickness=3;   // tangential thickness of each tab (mm)
+  const flangeOffset=flangeThickness/2;
+  for(let i=0;i<count;i++){
+   for(const edge of [0,1]){
+    const seam=(i+edge)/count*Math.PI*2;
+    // Offset toward the interior of this panel, away from its neighbour.
+    const tangentialOffset=edge===0?flangeOffset:-flangeOffset;
+    const flange=makeClipFlangeGeometry(
+     profile,seam,yMin,yMax,clearance,wall,
+     flangeProjection,flangeThickness,tangentialOffset
+    );
+    const joined=csgCombine(panelGeometries[i],flange,ADDITION);
+    panelGeometries[i].dispose();
+    flange.dispose();
+    panelGeometries[i]=joined;
+   }
+  }
+
   // Add removable panels without rectangular blocks underneath.
   for(let i=0;i<count;i++){
    status(`Finishing panel ${i+1}/${count}…`);await yieldUI();
