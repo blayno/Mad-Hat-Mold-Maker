@@ -481,6 +481,20 @@ function keyGeometry(angle,radius,y,tangent=6,radial=12,height=8){
  g.translate(Math.sin(angle)*radius,y,Math.cos(angle)*radius);
  return g;
 }
+function radialBottomNubGeometry(angle,radius,y,diameter=2,depth=3.6){
+  // Horizontal male locating stub. Its radial axis points out from the base
+  // and into the matching socket in the lower inside face of the wall.
+  const g=new THREE.CylinderGeometry(diameter/2,diameter/2,depth,32,1,false);
+  const radial=new THREE.Vector3(Math.sin(angle),0,Math.cos(angle)).normalize();
+  g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0,1,0),radial
+  ));
+  g.translate(Math.sin(angle)*radius,y,Math.cos(angle)*radius);
+  g.computeVertexNormals();
+  g.computeBoundingBox();
+  g.computeBoundingSphere();
+  return g;
+}
 function roundSideKeyGeometry(angle,radius,y,keyRadius=3,depth=12){
  // Round alignment dowel crosses the VERTICAL PANEL-TO-PANEL SEAM.
  // Its axis is tangent to the mold circumference, so it sticks sideways
@@ -600,8 +614,10 @@ async function generate(){
   baseResult.updateMatrixWorld(true);
   let baseOut=baseResult.geometry.clone();baseOut.applyMatrix4(baseResult.matrixWorld);baseOut.computeVertexNormals();
   fittedBase.dispose();fittedBrush.geometry.dispose();fittedBrush.material.dispose();baseResult.geometry.dispose();baseResult.material.dispose();
-  // Export the final Boolean-trimmed base following the inner cavity perimeter, not the temporary square blank.
-  resultGeometries.push({name:'Mold_Base',geometry:baseOut,position:new THREE.Vector3(),rotation:new THREE.Euler(),color:0x555b62});
+  // Keep the base geometry local until all locating stubs have been fused.
+  // Do NOT add it to resultGeometries yet: each Boolean union below replaces
+  // and disposes the previous base geometry. Adding it early leaves the export
+  // and preview pointing at the disposed, nub-free original base.
   const panelGeometries=[];
   for(let i=0;i<count;i++){
    status(`Cutting contoured panel cavity ${i+1}/${count}…`);await yieldUI();
@@ -617,6 +633,35 @@ async function generate(){
    panelGeo.computeBoundingSphere();
    panelGeometries.push(panelGeo);
   }
+  // Add one clearly projecting 2 mm male stub to the base for each wall.
+  // The stub centre is deliberately placed INSIDE the base's outer perimeter.
+  // This gives the Boolean union a generous overlap (rather than a marginal
+  // tangency), while the outer end projects into the matching wall socket.
+  // The socket is cut at the exact same XYZ location, on the lower inside face.
+  const bottomNubDiameter=2;
+  const bottomNubDepth=2.0;
+  const bottomSocketDiameter=2.5;
+  const bottomSocketDepth=4.4;
+  const bottomNubY=yMin+2.5;
+  for(let i=0;i<count;i++){
+   status(`Adding base locating stub and matching wall socket ${i+1}/${count}…`);await yieldUI();
+   const angle=(i+0.5)/count*Math.PI*2;
+   const innerRadius=profileRadius(profile,angle,0)+Math.max(0,clearance);
+   // Base footprint ends at innerRadius - 0.2 mm. Centre the stub at
+   // innerRadius - 0.1 mm so about 1.7 mm of its length is fused into the base.
+   const nubCentreRadius=innerRadius-0.1;
+   const nub=radialBottomNubGeometry(angle,nubCentreRadius,bottomNubY,bottomNubDiameter,bottomNubDepth);
+   const joinedBase=csgCombine(baseOut,nub,ADDITION);
+   baseOut.dispose();nub.dispose();baseOut=joinedBase;
+
+   // Matching slightly oversized blind socket in the panel's lower inside face.
+   const socket=radialBottomNubGeometry(angle,nubCentreRadius,bottomNubY,bottomSocketDiameter,bottomSocketDepth);
+   const cutPanel=csgCombine(panelGeometries[i],socket,SUBTRACTION);
+   panelGeometries[i].dispose();socket.dispose();panelGeometries[i]=cutPanel;
+  }
+  // Register the FINAL base only after all male stubs have been fused onto it.
+  resultGeometries.unshift({name:'Mold_Base',geometry:baseOut,position:new THREE.Vector3(),rotation:new THREE.Euler(),color:0x555b62});
+
   // Two short round alignment pins per vertical seam: one near the
   // bottom and one near the top. They sit inside the thick outer wall zone.
   const pinRadius=Math.min(2.5,Math.max(1.5,wall*0.22));
@@ -790,6 +835,16 @@ const exporter=new STLExporter();
 // DataView has no .length. Always copy its exact byte range into a Uint8Array.
 function exportSTLBytes(geometry){
  const printable=preparePrintableGeometry(geometry);
+ // Mold generation and the 3D preview use Y as the vertical axis.
+ // Standard 3D-printing STL orientation is Z-up, so rotate the finished
+ // export geometry +90 degrees around X before writing the STL. This maps
+ // application +Y (up) to STL +Z (up), leaving the part's bottom on Z=0.
+ // Apply this here so single-part, normal ZIP, and exploded ZIP exports
+ // all receive exactly the same orientation correction.
+ printable.applyMatrix4(new THREE.Matrix4().makeRotationX(Math.PI/2));
+ printable.computeVertexNormals();
+ printable.computeBoundingBox();
+ printable.computeBoundingSphere();
  const material=new THREE.MeshBasicMaterial();
  const mesh=new THREE.Mesh(printable,material);
  mesh.position.set(0,0,0);
