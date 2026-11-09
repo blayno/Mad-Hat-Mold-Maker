@@ -29,7 +29,7 @@ Run: pip install -r requirements_MadHat_Mold_Generator.txt
 
 Run the application
 
-Copy and paste into CM: python MadHat_Negative_Mold_Generator.py
+Copy and paste into CMD: python MadHat_Negative_Mold_Generator.py
 or double click the python file
 
 
