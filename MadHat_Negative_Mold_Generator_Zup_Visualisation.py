@@ -21,7 +21,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import trimesh
-from scipy.ndimage import gaussian_filter
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -87,75 +86,63 @@ def boolean(meshes, operation):
     return result
 
 
-def radial_profile(mesh, height, angle_count=192, y_count=96):
-    """
-    Build a stable radial envelope from the source mesh.
-
-    Vertex bins can be sparse and can leave isolated spikes/gaps.  Fill each
-    angular row periodically, interpolate empty height rows, then apply a
-    restrained 2-D Gaussian smooth.  This removes sampling noise without
-    introducing the large neighbourhood-max bulges that caused cavity artefacts.
-    """
-    v = np.asarray(mesh.vertices, dtype=float)
-    radii = np.full((y_count + 1, angle_count), np.nan, dtype=float)
-
-    yi = np.clip(np.rint(v[:, 1] / max(height, 1e-8) * y_count).astype(int),
-                 0, y_count)
+def radial_profile(mesh, height, angle_count=144, y_count=48):
+    """Conservative radial envelope of the model at sampled heights/angles."""
+    v = mesh.vertices
+    radii = np.full((y_count + 1, angle_count), np.nan)
+    yi = np.clip(np.rint(v[:, 1] / max(height, 1e-8) * y_count).astype(int), 0, y_count)
     angles = (np.arctan2(v[:, 0], v[:, 2]) + 2 * np.pi) % (2 * np.pi)
     ai = np.floor(angles / (2 * np.pi) * angle_count).astype(int) % angle_count
     rr = np.hypot(v[:, 0], v[:, 2])
-
-    # Keep the furthest observed vertex in each bin; this is the conservative
-    # radial silhouette needed for a negative cavity.
     for row, col, radius in zip(yi, ai, rr):
-        old = radii[row, col]
-        if not np.isfinite(old) or radius > old:
+        if not np.isfinite(radii[row, col]) or radius > radii[row, col]:
             radii[row, col] = radius
 
-    angles_grid = np.arange(angle_count + 1, dtype=float)
-    for row in range(y_count + 1):
-        valid = np.isfinite(radii[row])
-        if valid.sum() >= 2:
-            xp = np.flatnonzero(valid).astype(float)
-            fp = radii[row, valid]
-            xp_ext = np.r_[xp[-1] - angle_count, xp, xp[0] + angle_count]
-            fp_ext = np.r_[fp[-1], fp, fp[0]]
-            radii[row] = np.interp(angles_grid[:-1], xp_ext, fp_ext)
-        elif valid.sum() == 1:
-            radii[row] = radii[row, valid][0]
-
-    # Interpolate rows that contain no source vertices.
-    row_has_data = np.isfinite(radii).any(axis=1)
-    if not row_has_data.any():
-        raise ValueError("Could not build a radial profile from this STL.")
-    known_rows = np.flatnonzero(row_has_data)
-    for col in range(angle_count):
-        known = np.isfinite(radii[:, col])
-        if known.sum() >= 2:
-            radii[:, col] = np.interp(np.arange(y_count + 1),
-                                      np.flatnonzero(known), radii[known, col])
-        elif known.sum() == 1:
-            radii[:, col] = radii[known, col][0]
-        else:
-            radii[:, col] = np.interp(np.arange(y_count + 1), known_rows,
-                                      np.nanmean(radii[known_rows], axis=1))
+    # Fill sparse bins using a conservative neighbourhood maximum.
+    for _ in range(3):
+        old = radii.copy()
+        for y in range(y_count + 1):
+            for a in range(angle_count):
+                if np.isfinite(old[y, a]):
+                    continue
+                vals = []
+                for dy in range(-3, 4):
+                    yy = y + dy
+                    if 0 <= yy <= y_count:
+                        for da in range(-4, 5):
+                            val = old[yy, (a + da) % angle_count]
+                            if np.isfinite(val):
+                                vals.append(val)
+                if vals:
+                    radii[y, a] = max(vals)
 
     fallback = max(mesh.extents[0], mesh.extents[2]) / 2
-    radii = np.nan_to_num(radii, nan=fallback, posinf=fallback, neginf=fallback)
-
-    # Smooth angular and vertical sampling noise.  A small outward safety pad
-    # keeps the generated cavity from cutting into the source model.
-    smooth = gaussian_filter(radii, sigma=(0.8, 1.15), mode=("nearest", "wrap"))
-    smooth = np.maximum(smooth, radii - max(0.15, fallback * 0.001))
-    pad = max(0.35, min(1.0, max(mesh.extents[0], mesh.extents[2]) * 0.002))
+    radii[~np.isfinite(radii)] = fallback
+    # Conservative smoothing; keep the envelope outside measured vertices.
+    smooth = radii.copy()
+    for y in range(1, y_count):
+        for a in range(angle_count):
+            avg = (radii[y, a] * 4 + radii[y, (a-1) % angle_count] +
+                   radii[y, (a+1) % angle_count] + radii[y-1, a] +
+                   radii[y+1, a]) / 8
+            smooth[y, a] = max(radii[y, a], avg)
+    pad = max(1.0, min(2.0, max(mesh.extents[0], mesh.extents[2]) * .004))
     smooth += pad
 
-    # Smooth the external wall separately so the wall remains visually clean.
-    outer = gaussian_filter(smooth, sigma=(1.2, 2.0), mode=("nearest", "wrap"))
-    first = int(math.ceil(0.90 * y_count))
+    # Smooth only the outer wall profile.
+    outer = smooth.copy()
+    kernel = np.array([1, 4, 6, 4, 1], dtype=float) / 16
+    for _ in range(8):
+        tmp = np.empty_like(outer)
+        for y in range(y_count + 1):
+            tmp[y] = sum(kernel[k+2] * np.roll(outer[y], k) for k in range(-2, 3))
+        new = np.empty_like(tmp)
+        for y in range(y_count + 1):
+            new[y] = sum(kernel[k+2] * tmp[np.clip(y+k, 0, y_count)] for k in range(-2, 3))
+        outer = new
+    first = int(math.ceil(.90 * y_count))
     opening = float(np.max(smooth[first]))
     smooth[first:] = opening
-    outer[first:] = max(opening, float(np.max(outer[first:])))
     return {"inner": smooth, "outer": outer, "height": height,
             "angles": angle_count, "rows": y_count}
 
@@ -176,54 +163,69 @@ def profile_radius(profile, angle, y, outer=False):
     return float(r0 * (1-yt) + r1 * yt)
 
 
-def radial_cavity_cutter(profile, clearance, y_extra=0.75, count=192):
-    """Create a clean watertight lofted cutter from the smoothed radial profile."""
-    height = float(profile["height"])
-    y0, y1 = -float(y_extra), height + float(y_extra)
-    rows = max(64, int(profile["rows"]) * 2)
-    verts, faces = [], []
-
-    for j in range(rows + 1):
-        y = y0 + (y1 - y0) * j / rows
-        source_y = float(np.clip(y, 0.0, height))
-        for i in range(count):
-            angle = 2.0 * math.pi * i / count
-            radius = max(0.2, profile_radius(profile, angle, source_y)
-                         + max(0.0, float(clearance)))
-            verts.append([math.sin(angle) * radius, y,
-                          math.cos(angle) * radius])
-
-    for j in range(rows):
-        for i in range(count):
-            ni = (i + 1) % count
-            a, b = j * count + i, j * count + ni
-            c, d = (j + 1) * count + ni, (j + 1) * count + i
-            faces.extend([[a, b, d], [b, c, d]])
-
-    bottom_center = len(verts)
-    verts.append([0.0, y0, 0.0])
-    top_center = len(verts)
-    verts.append([0.0, y1, 0.0])
-    top_start = rows * count
-    for i in range(count):
-        ni = (i + 1) % count
-        faces.append([bottom_center, ni, i])
-        faces.append([top_center, top_start + i, top_start + ni])
-
-    cutter = trimesh.Trimesh(vertices=np.asarray(verts),
-                             faces=np.asarray(faces), process=True)
-    cutter.remove_unreferenced_vertices()
-    cutter.fix_normals()
-    return cutter
-
-
 def offset_model(mesh, clearance):
-    """Approximate normal offset using trimesh's vertex normals."""
-    out = mesh.copy()
-    normals = out.vertex_normals
-    out.vertices += normals * (max(0.0, clearance) + .15)
-    out.fix_normals()
-    return out
+    """Build a robust outward offset using a filled voxel distance field.
+
+    Vertex-normal offsets can fold over on dense, highly curved meshes.  A
+    volumetric dilation avoids those self-intersections and gives the Boolean
+    engine a single, watertight cutter.  The voxel pitch is capped at 0.5 mm
+    for useful detail without creating an excessive memory footprint.
+    """
+    from scipy import ndimage
+
+    distance = max(0.0, float(clearance)) + 0.15
+    if not np.isfinite(distance):
+        raise ValueError("Cavity clearance must be a finite number.")
+
+    extents = np.asarray(mesh.extents, dtype=float)
+    if np.any(~np.isfinite(extents)) or np.any(extents <= 0):
+        raise ValueError("Cannot offset a mesh with invalid dimensions.")
+
+    # Keep the grid fine enough to represent the clearance, while limiting
+    # the total number of voxels for larger source models.
+    pitch = min(0.5, max(0.35, distance / 6.0))
+    estimated_voxels = float(np.prod(np.ceil(extents / pitch + 4)))
+    if estimated_voxels > 14_000_000:
+        pitch *= (estimated_voxels / 14_000_000) ** (1.0 / 3.0)
+
+    try:
+        surface = mesh.voxelized(pitch=pitch)
+        solid = surface.fill()
+        occupied = np.asarray(solid.matrix, dtype=bool)
+        if occupied.size == 0 or not occupied.any():
+            raise ValueError("Voxelisation produced an empty model.")
+
+        # Add enough empty space around the source for the complete offset.
+        pad = int(math.ceil(distance / pitch)) + 3
+        padded = np.pad(occupied, pad, mode="constant", constant_values=False)
+
+        # Distance from every empty voxel centre to the filled source volume.
+        # Include half a voxel diagonal to compensate for centre sampling and
+        # produce a conservative outward clearance.
+        outside_distance = ndimage.distance_transform_edt(~padded, sampling=pitch)
+        offset_volume = padded | (outside_distance <= distance + pitch * 0.5)
+
+        out = trimesh.voxel.ops.matrix_to_marching_cubes(
+            offset_volume, pitch=pitch
+        )
+        # matrix_to_marching_cubes returns coordinates relative to the padded
+        # array. Restore the source voxel grid's world-space origin.
+        grid_origin = np.asarray(surface.transform[:3, 3], dtype=float)
+        out.apply_translation(grid_origin - pad * pitch)
+        out.remove_unreferenced_vertices()
+        out.process(validate=True)
+        out.fix_normals()
+
+        if (not out.is_watertight or not out.is_winding_consistent or
+                not np.isfinite(out.vertices).all() or out.volume <= 0):
+            raise RuntimeError(
+                "The volumetric cavity offset did not produce a valid closed solid."
+            )
+        return out
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not create a clean {distance:.2f} mm cavity offset: {exc}"
+        ) from exc
 
 
 def annular_panel(profile, a0, a1, y_min, y_max, wall, clearance, base_top):
@@ -358,6 +360,11 @@ def transform_to_export(mesh):
     return out
 
 
+def transform_to_preview(mesh):
+    """Return a Z-up preview copy without changing generated/export meshes."""
+    return transform_to_export(mesh)
+
+
 @dataclass
 class MoldPart:
     name: str
@@ -372,6 +379,7 @@ class MoldGenerator:
         self.parts: list[MoldPart] = []
         self.profile = None
         self.lift_y = 0.0
+        self.base_top = 0.0
 
     def load_stl(self, path):
         mesh = trimesh.load(path, force="mesh")
@@ -400,18 +408,14 @@ class MoldGenerator:
         wall=max(3,float(wall)); base=max(3,float(base))
         y_min=1-base
         base_bottom=y_min
-        # The source model is normalized so its lowest point is Y=0.
-        # End the base exactly at that plane: this gives the STL a true
-        # face-to-face seat instead of burying its bottom inside the base.
-        actual_base=max(1,base-1.0)
-        base_top=0.0
+        actual_base=max(1,base-.5)
+        base_top=base_bottom+actual_base
+        self.base_top = base_top
         y_max=base_top+size[1]+max(0,float(top_extra))
         profile=radial_profile(src,size[1])
         self.profile=profile
-        # A continuous radial loft avoids transferring source triangle noise
-        # into the cavity, which caused random Boolean surface artefacts.
-        cutter = radial_cavity_cutter(profile, clearance)
-        cutter.apply_translation([0, base_top, 0])
+        cutter=offset_model(src,clearance)
+        cutter.apply_translation([0,base_top,0])
         if progress: progress("Building fitted base…")
         base_blank=radial_prism(profile,base_bottom,base_top,clearance)
         parts=[]
@@ -428,17 +432,7 @@ class MoldGenerator:
             a0=i/panels*2*np.pi; a1=(i+1)/panels*2*np.pi
             blank=annular_panel(profile,a0,a1,y_min,y_max,wall,clearance,base_top)
             panel=boolean([blank,cutter],"difference")
-            # Panel-to-panel alignment pins at top and bottom of each seam.
-            pin_r=min(2.5,max(1.5,wall*.22))
-            male_r=max(.8,pin_r-.2)
-            inset=max(pin_r+.8,min(wall*.55,wall-1))
-            seam=a1
-            for yy in (y_min+pin_r+.5,y_max-pin_r-.5):
-                rr=profile_radius(profile,seam,yy)+inset
-                point=[math.sin(seam)*rr,yy,math.cos(seam)*rr]
-                tangent=[math.cos(seam),0,-math.sin(seam)]
-                male=cylinder_between(male_r*1.0,2.0,point-np.array(tangent),tangent)
-                panel=boolean([panel,male],"union")
+            # Flange-mounted alignment nubs below provide panel registration.
             # Contoured external clip flanges. Their full height follows the
             # smoothed outer wall profile instead of using a rectangular block.
             # Opposing tabs are shifted tangentially by half their thickness,
@@ -446,6 +440,22 @@ class MoldGenerator:
             flange_projection = 12.0
             flange_thickness = 3.0
             flange_offset = flange_thickness / 2
+            # Each seam uses a male/female pair across the touching side
+            # faces of the offset flanges.  The two locating nubs sit near the
+            # top and bottom of the flange and are centred across its radial
+            # width (the middle of the flange's projection).
+            flange_nub_radius = 1.5
+            flange_hole_radius = 1.8
+            flange_nub_depth = 2.8
+            flange_end_inset = min(
+                (y_max - y_min) * 0.2,
+                max(4.0, flange_nub_radius + 1.5)
+            )
+            flange_nub_heights = (
+                y_min + flange_end_inset,
+                y_max - flange_end_inset,
+            )
+
             for edge, angle in ((0, a0), (1, a1)):
                 tangential_offset = flange_offset if edge == 0 else -flange_offset
                 flange = contoured_clip_flange(
@@ -455,6 +465,50 @@ class MoldGenerator:
                     thickness=flange_thickness,
                     tangential_offset=tangential_offset,
                 )
+
+                # At every seam, the right-hand flange (edge 1) carries
+                # outward-facing male nubs.  The next panel's left-hand
+                # flange (edge 0) receives matching blind female sockets.
+                tangent = np.array([math.cos(angle), 0.0, -math.sin(angle)])
+                radial = np.array([math.sin(angle), 0.0, math.cos(angle)])
+                side_tangent = (
+                    tangential_offset + flange_thickness / 2
+                    if edge == 1 else
+                    tangential_offset - flange_thickness / 2
+                )
+
+                for nub_y in flange_nub_heights:
+                    source_y = float(np.clip(nub_y - base_top, 0, profile["height"]))
+                    panel_outer = (
+                        profile_radius(profile, angle, source_y, True)
+                        + max(0.0, clearance) + wall
+                        + max(5.0, wall * 0.55)
+                    )
+                    nub_radial = panel_outer + flange_projection / 2
+                    face_point = (
+                        radial * nub_radial
+                        + np.array([0.0, nub_y, 0.0])
+                        + tangent * side_tangent
+                    )
+
+                    if edge == 1:
+                        # Start slightly inside the flange face to guarantee
+                        # a sound union, then project into the mating flange.
+                        male_start = face_point - tangent * 0.35
+                        male = cylinder_between(
+                            flange_nub_radius, flange_nub_depth,
+                            male_start, tangent
+                        )
+                        flange = boolean([flange, male], "union")
+                    else:
+                        # Matching socket, with a small radial clearance.
+                        socket_start = face_point - tangent * 0.25
+                        socket = cylinder_between(
+                            flange_hole_radius, flange_nub_depth + 0.5,
+                            socket_start, tangent
+                        )
+                        flange = boolean([flange, socket], "difference")
+
                 panel = boolean([panel, flange], "union")
 
             # Cut the adjustable silicone pour channel vertically through the
@@ -670,12 +724,18 @@ class MainWindow(QMainWindow):
             self.source_actor = None
             self.source_edge_actor = None
             return
-        # Mold parts are lifted together to put the base on the build plate.
-        # Apply that same display-only lift to the source STL so it remains
-        # seated on the base instead of appearing to pass through it.
-        source_preview = self.generator.source.copy()
-        source_preview.apply_translation([0.0, self.generator.lift_y, 0.0])
-        source_poly = pv.wrap(source_preview)
+        # Show the located plug after generation so the two female sockets
+        # receiving the base locating pins are visible in the preview.
+        # This is a display-only copy; STL export geometry is not changed.
+        preview_mesh = (self.generator.plug.copy()
+                        if self.generator.plug is not None
+                        else self.generator.source.copy())
+        if self.generator.parts:
+            preview_mesh.apply_translation([
+                0, self.generator.base_top + self.generator.lift_y, 0
+            ])
+        preview_mesh = transform_to_preview(preview_mesh)
+        source_poly = pv.wrap(preview_mesh)
         self.source_actor = self.plotter.add_mesh(
             source_poly,
             color="#25d8cf",
@@ -709,10 +769,11 @@ class MainWindow(QMainWindow):
                 self.source_edge_actor = None
 
     def _add_part_preview(self, mesh, part, index):
-        """Add a lit solid and a separate feature-edge overlay for clear part boundaries."""
+        """Add a lit Z-up preview copy and feature-edge overlay."""
         color = "#68727e" if index == 0 else PALETTE[(index - 1) % len(PALETTE)]
+        preview_mesh = transform_to_preview(mesh)
         surface = self.plotter.add_mesh(
-            pv.wrap(mesh),
+            pv.wrap(preview_mesh),
             color=color,
             smooth_shading=True,
             show_edges=False,
@@ -725,7 +786,7 @@ class MainWindow(QMainWindow):
 
         outline = None
         try:
-            edge_mesh = pv.wrap(mesh).extract_feature_edges(
+            edge_mesh = pv.wrap(preview_mesh).extract_feature_edges(
                 feature_angle=12,
                 boundary_edges=True,
                 non_manifold_edges=True,
@@ -752,6 +813,7 @@ class MainWindow(QMainWindow):
         self.plotter.reset_camera()
         try:
             self.plotter.view_isometric()
+            self.plotter.camera.up = (0, 0, 1)
             self.plotter.camera.zoom(1.12)
         except Exception:
             pass
@@ -852,7 +914,15 @@ class MainWindow(QMainWindow):
         self.source_edge_actor = None
         if checked and self.show_source.isChecked() and self.generator.source is not None:
             try:
-                edges = pv.wrap(self.generator.source).extract_feature_edges(
+                preview_mesh = (self.generator.plug.copy()
+                                if self.generator.plug is not None
+                                else self.generator.source.copy())
+                if self.generator.parts:
+                    preview_mesh.apply_translation([
+                        0, self.generator.base_top + self.generator.lift_y, 0
+                    ])
+                preview_mesh = transform_to_preview(preview_mesh)
+                edges = pv.wrap(preview_mesh).extract_feature_edges(
                     feature_angle=8,
                     boundary_edges=True,
                     non_manifold_edges=True,
