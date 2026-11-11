@@ -361,8 +361,17 @@ def transform_to_export(mesh):
 
 
 def transform_to_preview(mesh):
-    """Return a Z-up preview copy without changing generated/export meshes."""
-    return transform_to_export(mesh)
+    """Rotate a preview copy to Z-up while preserving its world position.
+
+    Unlike STL export, the visualiser must not rebase each individual mesh to
+    Z=0.  Doing so discards the source model's base_top/lift_y placement and
+    makes the source appear to sink into or intersect the mould base.
+    """
+    out = mesh.copy()
+    out.apply_transform(
+        trimesh.transformations.rotation_matrix(math.pi / 2, [1, 0, 0])
+    )
+    return out
 
 
 @dataclass
