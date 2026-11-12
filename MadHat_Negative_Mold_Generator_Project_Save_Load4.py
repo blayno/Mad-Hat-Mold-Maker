@@ -16,6 +16,8 @@ import math
 import os
 import sys
 import zipfile
+import json
+import io
 import traceback
 from dataclasses import dataclass
 
@@ -389,6 +391,9 @@ class MoldGenerator:
         self.profile = None
         self.lift_y = 0.0
         self.base_top = 0.0
+        self.cavity_volume_mm3 = 0.0
+        self.pour_channel_volume_mm3 = 0.0
+        self.total_resin_volume_mm3 = 0.0
 
     def load_stl(self, path):
         mesh = trimesh.load(path, force="mesh")
@@ -424,7 +429,51 @@ class MoldGenerator:
         profile=radial_profile(src,size[1])
         self.profile=profile
         cutter=offset_model(src,clearance)
+        # The offset cutter encloses the expanded model envelope. Resin fills
+        # only the gap between that envelope and the original STL, so subtract
+        # the original solid volume from the offset volume.
+        expanded_volume = abs(float(cutter.volume))
+        source_volume = abs(float(src.volume))
+        self.cavity_volume_mm3 = expanded_volume - source_volume
+        if (not np.isfinite(self.cavity_volume_mm3) or
+                self.cavity_volume_mm3 <= 0):
+            raise ValueError(
+                "Could not calculate a valid silicone gap volume. "
+                "Check that the source STL is a closed, watertight solid "
+                "and that the cavity clearance is greater than zero."
+            )
         cutter.apply_translation([0,base_top,0])
+
+        # Calculate the pour channel's additional volume. The channel is
+        # counted only where it lies outside the expanded model envelope,
+        # preventing overlap with the already-counted resin gap.
+        hole_diameter = max(2.0, min(50.0, float(fill_diameter)))
+        hole_depth = max(1.0, min(float(fill_depth), y_max - y_min))
+        pour_channel = vertical_cylinder(
+            radius=hole_diameter / 2,
+            height=hole_depth,
+            sections=96,
+        )
+        # Measure only the portion inside the mold, not the extra 1 mm
+        # cutter overrun used by the panel Boolean operation.
+        pour_channel.apply_translation(
+            [0, y_max - hole_depth / 2, 0]
+        )
+        channel_overlap = boolean(
+            [pour_channel, cutter], "intersection"
+        )
+        channel_overlap_volume = (
+            abs(float(channel_overlap.volume))
+            if channel_overlap is not None and len(channel_overlap.faces)
+            else 0.0
+        )
+        self.pour_channel_volume_mm3 = max(
+            0.0, abs(float(pour_channel.volume)) - channel_overlap_volume
+        )
+        self.total_resin_volume_mm3 = (
+            self.cavity_volume_mm3 + self.pour_channel_volume_mm3
+        )
+
         if progress: progress("Building fitted base…")
         base_blank=radial_prism(profile,base_bottom,base_top,clearance)
         parts=[]
@@ -567,6 +616,61 @@ class MoldGenerator:
         self.parts=[MoldPart("Mold_Base",base_mesh)]+parts
         return self.parts
 
+    def generate_flat_2d(self, wall=8.0, base=6.0, top_extra=8.0, margin=10.0,
+                        progress=None):
+        """Create a one-piece flat pour tray with the source STL as a raised positive plug.
+
+        The tray base and four perimeter walls form the outside boundary. The
+        original model is fused to the base, leaving a silicone-filled gap
+        between the raised model and the surrounding border.
+        """
+        if self.source is None:
+            raise ValueError("Load an STL first.")
+        src = self.source.copy()
+        sx, sy, sz = map(float, src.extents)
+        if min(sx, sy, sz) <= 0:
+            raise ValueError("The STL has invalid or zero dimensions.")
+
+        wall = max(2.0, float(wall))
+        base = max(2.0, float(base))
+        margin = max(2.0, float(margin))
+        wall_height = sy + max(0.0, float(top_extra))
+        inner_x = sx + 2.0 * margin
+        inner_z = sz + 2.0 * margin
+        outer_x = inner_x + 2.0 * wall
+        outer_z = inner_z + 2.0 * wall
+
+        if progress:
+            progress("Building flat mold tray and raised plug…")
+        tray = box_mesh([outer_x, base, outer_z], [0, -base / 2 + 0.2, 0])
+        # Perimeter walls sit on the base and surround the raised source model.
+        walls = [
+            box_mesh([wall, wall_height, outer_z],
+                     [-inner_x / 2 - wall / 2, wall_height / 2, 0]),
+            box_mesh([wall, wall_height, outer_z],
+                     [ inner_x / 2 + wall / 2, wall_height / 2, 0]),
+            box_mesh([inner_x, wall_height, wall],
+                     [0, wall_height / 2, -inner_z / 2 - wall / 2]),
+            box_mesh([inner_x, wall_height, wall],
+                     [0, wall_height / 2,  inner_z / 2 + wall / 2]),
+        ]
+        tray = boolean([tray] + walls + [src], "union")
+        tray.fix_normals()
+        if not tray.is_watertight:
+            raise RuntimeError("The flat mold tray did not produce a watertight solid.")
+
+        # Silicone occupies the rectangular well, excluding the raised STL plug.
+        well_volume = inner_x * inner_z * wall_height
+        self.cavity_volume_mm3 = max(0.0, well_volume - abs(float(src.volume)))
+        self.pour_channel_volume_mm3 = 0.0
+        self.total_resin_volume_mm3 = self.cavity_volume_mm3
+        self.base_top = 0.0
+        self.lift_y = 0.0
+        self.profile = None
+        self.plug = src.copy()
+        self.parts = [MoldPart("Flat_2D_Negative_Mold", tray)]
+        return self.parts
+
     def export_part(self, index, path):
         transform_to_export(self.parts[index].mesh).export(path, file_type="stl")
 
@@ -612,10 +716,25 @@ class MainWindow(QMainWindow):
         self.load_btn=QPushButton("UPLOAD STL MODEL")
         self.load_btn.clicked.connect(self.load_stl)
         sf.addWidget(self.load_btn)
+        self.delete_stl_btn = QPushButton("DELETE STL")
+        self.delete_stl_btn.setEnabled(False)
+        self.delete_stl_btn.clicked.connect(self.delete_stl)
+        sf.addWidget(self.delete_stl_btn)
+        self.save_project_btn = QPushButton("SAVE PROJECT")
+        self.save_project_btn.setEnabled(False)
+        self.save_project_btn.clicked.connect(self.save_project)
+        sf.addWidget(self.save_project_btn)
+        self.load_project_btn = QPushButton("LOAD PROJECT")
+        self.load_project_btn.clicked.connect(self.load_project)
+        sf.addWidget(self.load_project_btn)
         self.model_info=QLabel("No model loaded."); self.model_info.setWordWrap(True)
         sf.addWidget(self.model_info); side.addWidget(source)
 
         opts=QGroupBox("2 · Mold layout"); form=QFormLayout(opts)
+        self.mold_style = QComboBox()
+        self.mold_style.addItem("Multi-piece 3D mold", "multi")
+        self.mold_style.addItem("2D flat pour mold", "flat")
+        form.addRow("Mold type", self.mold_style)
         self.panel_count=QComboBox()
         for n in (4,5,6,8): self.panel_count.addItem(f"{n} panels",n)
         self.top_extra=self.spin(8,0,100,1)
@@ -633,13 +752,42 @@ class MainWindow(QMainWindow):
         form.addRow("Fill hole depth (mm)",self.fill_depth)
         side.addWidget(opts)
 
+        # Capacity panel: reports the cavity's calculated resin volume after
+        # generation, plus a practical 10% allowance for mixing/pouring loss.
+        capacity = QGroupBox("3 · Mold capacity / Silicone required")
+        capacity_layout = QVBoxLayout(capacity)
+        self.capacity_volume = QLabel("Silicone gap required: —")
+        self.capacity_channel = QLabel("Pour channel volume: —")
+        self.capacity_total = QLabel("Total silicone required: —")
+        self.capacity_extra = QLabel("Mixing amount (+10%): —")
+        self.capacity_volume.setStyleSheet(
+            "font-size:16px;font-weight:bold;color:#f0a500;padding:3px;")
+        self.capacity_channel.setStyleSheet(
+            "font-size:13px;color:#ddd;padding:3px;")
+        self.capacity_total.setStyleSheet(
+            "font-size:15px;font-weight:bold;color:#f0a500;padding:3px;")
+        self.capacity_extra.setStyleSheet(
+            "font-size:14px;font-weight:bold;color:#75d6a3;padding:3px;")
+        self.capacity_note = QLabel(
+            "Adds the silicone gap around the STL to the pour channel volume. "
+            "The channel overlap with the expanded model is excluded to "
+            "avoid double-counting. Values are shown in mL and litres.")
+        self.capacity_note.setWordWrap(True)
+        self.capacity_note.setStyleSheet("color:#999;font-size:11px;")
+        capacity_layout.addWidget(self.capacity_volume)
+        capacity_layout.addWidget(self.capacity_channel)
+        capacity_layout.addWidget(self.capacity_total)
+        capacity_layout.addWidget(self.capacity_extra)
+        capacity_layout.addWidget(self.capacity_note)
+        side.addWidget(capacity)
+
         self.generate_btn=QPushButton("GENERATE MOLD")
         self.generate_btn.setEnabled(False); self.generate_btn.clicked.connect(self.generate)
         side.addWidget(self.generate_btn)
         self.status=QLabel("Upload an STL to begin."); self.status.setWordWrap(True)
         side.addWidget(self.status)
 
-        exp=QGroupBox("3 · Exploded view / export"); ef=QVBoxLayout(exp)
+        exp=QGroupBox("4 · Exploded view / export"); ef=QVBoxLayout(exp)
         self.explode=QSlider(Qt.Horizontal); self.explode.setRange(0,100)
         self.explode.valueChanged.connect(self.apply_explode)
         ef.addWidget(QLabel("Explode amount")); ef.addWidget(self.explode)
@@ -834,12 +982,206 @@ class MainWindow(QMainWindow):
             pass
         self.plotter.render()
 
+    def _project_settings(self):
+        """Collect all user-adjustable mold settings plus fixed alignment parameters."""
+        return {
+            "mold_type": self.mold_style.currentData(),
+            "panel_count": int(self.panel_count.currentData()),
+            "top_extra": self.top_extra.value(),
+            "wall": self.wall.value(),
+            "base": self.base.value(),
+            "clearance": self.clearance.value(),
+            "fill_diameter": self.fill_dia.value(),
+            "fill_depth": self.fill_depth.value(),
+            "alignment": {
+                "base_pin_radius": 1.9,
+                "base_pin_height": 3.2,
+                "panel_nub_radius": 1.5,
+                "panel_socket_radius": 1.8,
+                "panel_nub_depth": 2.8,
+                "base_nub_radius": 1.0,
+                "base_socket_radius": 1.25
+            },
+            "preview": {
+                "show_source": self.show_source.isChecked(),
+                "show_source_edges": self.show_source_edges.isChecked(),
+                "show_outlines": self.show_outlines.isChecked(),
+                "explode": self.explode.value()
+            }
+        }
+
+    @staticmethod
+    def _mesh_bytes(mesh):
+        if mesh is None:
+            return None
+        return mesh.export(file_type="stl")
+
+    @staticmethod
+    def _mesh_from_bytes(data):
+        mesh = trimesh.load(io.BytesIO(data), file_type="stl", force="mesh")
+        if not isinstance(mesh, trimesh.Trimesh) or not len(mesh.faces):
+            raise ValueError("A project mesh could not be restored.")
+        mesh.remove_unreferenced_vertices()
+        mesh.fix_normals()
+        return mesh
+
+    def save_project(self):
+        if self.generator.source is None:
+            QMessageBox.information(self, "Save project", "Load an STL before saving a project.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save mold project", "Mad_Hat_Mold_Project.mhmold",
+            "Mad Hat Mold Project (*.mhmold)")
+        if not path:
+            return
+        if not path.lower().endswith(".mhmold"):
+            path += ".mhmold"
+        try:
+            manifest = {
+                "format": "MadHatMoldProject",
+                "version": 1,
+                "source_name": getattr(self, "source_filename", "source.stl"),
+                "settings": self._project_settings(),
+                "generator": {
+                    "lift_y": self.generator.lift_y,
+                    "base_top": self.generator.base_top,
+                    "cavity_volume_mm3": self.generator.cavity_volume_mm3,
+                    "pour_channel_volume_mm3": self.generator.pour_channel_volume_mm3,
+                    "total_resin_volume_mm3": self.generator.total_resin_volume_mm3,
+                    "parts": [
+                        {"name": part.name, "direction": list(part.direction),
+                         "mesh": f"geometry/part_{i:02d}.stl"}
+                        for i, part in enumerate(self.generator.parts)
+                    ],
+                    "has_plug": self.generator.plug is not None
+                }
+            }
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("project.json", json.dumps(manifest, indent=2))
+                archive.writestr("geometry/source_reference.stl",
+                                 self._mesh_bytes(self.generator.source))
+                if self.generator.plug is not None:
+                    archive.writestr("geometry/located_plug.stl",
+                                     self._mesh_bytes(self.generator.plug))
+                for i, part in enumerate(self.generator.parts):
+                    archive.writestr(f"geometry/part_{i:02d}.stl",
+                                     self._mesh_bytes(part.mesh))
+            self.status.setText(f"Project saved: {os.path.basename(path)}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save project failed", str(exc))
+
+    def load_project(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open mold project", "", "Mad Hat Mold Project (*.mhmold)")
+        if not path:
+            return
+        try:
+            with zipfile.ZipFile(path, "r") as archive:
+                manifest = json.loads(archive.read("project.json").decode("utf-8"))
+                if manifest.get("format") != "MadHatMoldProject":
+                    raise ValueError("This is not a valid Mad Hat mold project.")
+                if manifest.get("version") != 1:
+                    raise ValueError("This project uses an unsupported version.")
+                settings = manifest["settings"]
+                gen_data = manifest["generator"]
+                source = self._mesh_from_bytes(archive.read("geometry/source_reference.stl"))
+                restored_parts = []
+                for part_data in gen_data.get("parts", []):
+                    mesh = self._mesh_from_bytes(archive.read(part_data["mesh"]))
+                    restored_parts.append(MoldPart(
+                        part_data["name"], mesh,
+                        tuple(part_data.get("direction", (0.0, 0.0, 0.0)))))
+                plug = None
+                if gen_data.get("has_plug"):
+                    plug = self._mesh_from_bytes(archive.read("geometry/located_plug.stl"))
+
+            # Restore the original model and generated geometry without rerunning
+            # booleans, so reopening a project reproduces the saved mould exactly.
+            self.generator = MoldGenerator()
+            self.generator.source = source
+            self.generator.parts = restored_parts
+            self.generator.plug = plug
+            self.generator.lift_y = float(gen_data.get("lift_y", 0.0))
+            self.generator.base_top = float(gen_data.get("base_top", 0.0))
+            self.generator.cavity_volume_mm3 = float(gen_data.get("cavity_volume_mm3", 0.0))
+            self.generator.pour_channel_volume_mm3 = float(gen_data.get("pour_channel_volume_mm3", 0.0))
+            self.generator.total_resin_volume_mm3 = float(gen_data.get("total_resin_volume_mm3", 0.0))
+
+            self.mold_style.setCurrentIndex(max(0, self.mold_style.findData(settings.get("mold_type", "multi"))))
+            self.panel_count.setCurrentIndex(max(0, self.panel_count.findData(int(settings.get("panel_count", 4)))))
+            for key, widget in (("top_extra", self.top_extra), ("wall", self.wall),
+                                ("base", self.base), ("clearance", self.clearance),
+                                ("fill_diameter", self.fill_dia), ("fill_depth", self.fill_depth)):
+                if key in settings:
+                    widget.setValue(float(settings[key]))
+
+            preview = settings.get("preview", {})
+            self.show_source.setChecked(bool(preview.get("show_source", True)))
+            self.show_source_edges.setChecked(bool(preview.get("show_source_edges", True)))
+            self.show_outlines.setChecked(bool(preview.get("show_outlines", True)))
+            self.plotter.clear()
+            self.part_actors = []
+            self.outline_actors = []
+            self.visibility.clear()
+            for i, part in enumerate(self.generator.parts):
+                surface, outline = self._add_part_preview(part.mesh, part, i)
+                self.part_actors.append(surface)
+                self.outline_actors.append(outline)
+                item = QListWidgetItem(part.name.replace("_", " "))
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked)
+                self.visibility.addItem(item)
+            self._add_source_preview()
+            self._frame_preview()
+
+            source_name = manifest.get("source_name", "source.stl")
+            self.source_filename = source_name
+            self.model_info.setText(
+                f"{source_name}\\n{source.extents[0]:.1f} × "
+                f"{source.extents[1]:.1f} × {source.extents[2]:.1f} mm")
+            self.delete_stl_btn.setEnabled(True)
+            self.save_project_btn.setEnabled(True)
+            self.generate_btn.setEnabled(True)
+            has_geometry = bool(self.generator.parts)
+            for button in (self.export_selected, self.export_all,
+                           self.export_exploded, self.export_plug):
+                button.setEnabled(has_geometry)
+            self.explode_btn.setEnabled(has_geometry)
+            self.explode.setValue(int(preview.get("explode", 0)) if has_geometry else 0)
+            self._update_capacity_display()
+            self.status.setText(
+                f"Project loaded: {os.path.basename(path)}. "
+                "Saved mould geometry restored without regeneration.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Load project failed", str(exc))
+
+    def _update_capacity_display(self):
+        gap_ml = self.generator.cavity_volume_mm3 / 1000.0
+        channel_ml = self.generator.pour_channel_volume_mm3 / 1000.0
+        total_ml = self.generator.total_resin_volume_mm3 / 1000.0
+        self.capacity_volume.setText(
+            f"Silicone gap required: {gap_ml:,.1f} mL ({gap_ml/1000:,.3f} L)")
+        self.capacity_channel.setText(
+            f"Pour channel volume: {channel_ml:,.1f} mL ({channel_ml/1000:,.3f} L)")
+        self.capacity_total.setText(
+            f"Total silicone required: {total_ml:,.1f} mL ({total_ml/1000:,.3f} L)")
+        self.capacity_extra.setText(
+            f"Mixing amount (+10%): {total_ml*1.10:,.1f} mL "
+            f"({total_ml*1.10/1000:,.3f} L)")
+
     def load_stl(self):
         path,_=QFileDialog.getOpenFileName(self,"Open STL","","STL files (*.stl)")
         if not path: return
         try:
             size=self.generator.load_stl(path)
+            self.source_filename = os.path.basename(path)
+            self.save_project_btn.setEnabled(True)
             self.model_info.setText(f"{os.path.basename(path)}\\n{size[0]:.1f} × {size[1]:.1f} × {size[2]:.1f} mm")
+            self.capacity_volume.setText("Silicone gap required: —")
+            self.capacity_channel.setText("Pour channel volume: —")
+            self.capacity_total.setText("Total silicone required: —")
+            self.capacity_extra.setText("Mixing amount (+10%): —")
+            self.delete_stl_btn.setEnabled(True)
             self.generate_btn.setEnabled(True)
             self.plotter.clear()
             self._add_source_preview()
@@ -848,16 +1190,59 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self,"STL load failed",str(e))
 
+    def delete_stl(self):
+        """Remove the loaded STL and clear any mold generated from it."""
+        if self.generator.source is None:
+            return
+        answer = QMessageBox.question(
+            self, "Delete STL",
+            "Delete the loaded STL and all generated mold parts?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+
+        # Reset all model and generated geometry while preserving the UI settings.
+        self.generator = MoldGenerator()
+        self.plotter.clear()
+        self.source_actor = None
+        self.source_edge_actor = None
+        self.part_actors = []
+        self.outline_actors = []
+        self.visibility.clear()
+        self.model_info.setText("No model loaded.")
+        self.capacity_volume.setText("Silicone gap required: —")
+        self.capacity_channel.setText("Pour channel volume: —")
+        self.capacity_total.setText("Total silicone required: —")
+        self.capacity_extra.setText("Mixing amount (+10%): —")
+        self.generate_btn.setEnabled(False)
+        self.delete_stl_btn.setEnabled(False)
+        self.save_project_btn.setEnabled(False)
+        self.explode.setValue(0)
+        self.explode_label.setText("0%")
+        self.explode_btn.setText("EXPLODE MOLD")
+        self.explode_btn.setEnabled(False)
+        for button in (self.export_selected, self.export_all,
+                       self.export_exploded, self.export_plug):
+            button.setEnabled(False)
+        self.status.setText("STL deleted. Upload a new STL to begin.")
+        self._frame_preview()
+
     def generate(self):
         self.generate_btn.setEnabled(False); self.progress.show()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             self.plotter.clear()
-            parts=self.generator.generate(
-                panels=self.panel_count.currentData(),top_extra=self.top_extra.value(),
-                wall=self.wall.value(),base=self.base.value(),clearance=self.clearance.value(),
-                fill_diameter=self.fill_dia.value(),fill_depth=self.fill_depth.value(),
-                progress=lambda msg:self.status.setText(msg))
+            if self.mold_style.currentData() == "flat":
+                parts = self.generator.generate_flat_2d(
+                    wall=self.wall.value(), base=self.base.value(),
+                    top_extra=self.top_extra.value(), margin=10.0,
+                    progress=lambda msg: self.status.setText(msg))
+            else:
+                parts=self.generator.generate(
+                    panels=self.panel_count.currentData(),top_extra=self.top_extra.value(),
+                    wall=self.wall.value(),base=self.base.value(),clearance=self.clearance.value(),
+                    fill_diameter=self.fill_dia.value(),fill_depth=self.fill_depth.value(),
+                    progress=lambda msg:self.status.setText(msg))
             self.part_actors=[]
             self.outline_actors=[]
             self.visibility.clear()
@@ -873,10 +1258,40 @@ class MainWindow(QMainWindow):
             self.export_selected.setEnabled(True); self.export_all.setEnabled(True)
             self.export_exploded.setEnabled(True); self.export_plug.setEnabled(True)
             self.explode_btn.setEnabled(True)
+
+            # Convert the actual gap volume (expanded offset solid minus
+            # original STL solid) from mm³ to mL. Add a separate 10% mixing
+            # allowance for practical pouring losses.
+            gap_ml = self.generator.cavity_volume_mm3 / 1000.0
+            channel_ml = self.generator.pour_channel_volume_mm3 / 1000.0
+            total_ml = self.generator.total_resin_volume_mm3 / 1000.0
+            recommended_ml = total_ml * 1.10
+
+            gap_l = gap_ml / 1000.0
+            channel_l = channel_ml / 1000.0
+            total_l = total_ml / 1000.0
+            recommended_l = recommended_ml / 1000.0
+
+            self.capacity_volume.setText(
+                f"Silicone gap required: {gap_ml:,.1f} mL  ({gap_l:,.3f} L)")
+            self.capacity_channel.setText(
+                f"Pour channel volume: {channel_ml:,.1f} mL  "
+                f"({channel_l:,.3f} L)")
+            self.capacity_total.setText(
+                f"Total silicone required: {total_ml:,.1f} mL  "
+                f"({total_l:,.3f} L)")
+            self.capacity_extra.setText(
+                f"Mixing amount (+10%): {recommended_ml:,.1f} mL  "
+                f"({recommended_l:,.3f} L)")
             self.explode.setValue(0)
             self.explode_btn.setText("EXPLODE MOLD")
-            self.status.setText(f"Generated 1 fitted base + {len(parts)-1} interlocking cavity panels. "
-                                f"Fill hole: {self.fill_dia.value():.1f} mm × {self.fill_depth.value():.1f} mm.")
+            if self.mold_style.currentData() == "flat":
+                self.status.setText(
+                    "Generated a one-piece 2D flat pour mold: raised positive plug, flat base "
+                    "and surrounding silicone-retaining border.")
+            else:
+                self.status.setText(f"Generated 1 fitted base + {len(parts)-1} interlocking cavity panels. "
+                                    f"Fill hole: {self.fill_dia.value():.1f} mm × {self.fill_depth.value():.1f} mm.")
         except Exception as e:
             traceback.print_exc()
             QMessageBox.critical(self,"Mold generation failed",str(e))
