@@ -644,6 +644,12 @@ class MainWindow(QMainWindow):
         self.explode.valueChanged.connect(self.apply_explode)
         ef.addWidget(QLabel("Explode amount")); ef.addWidget(self.explode)
         self.explode_label=QLabel("0%"); ef.addWidget(self.explode_label)
+
+        # One-click control to spread the generated mold parts apart.
+        self.explode_btn = QPushButton("EXPLODE MOLD")
+        self.explode_btn.setEnabled(False)
+        self.explode_btn.clicked.connect(self.toggle_exploded_view)
+        ef.addWidget(self.explode_btn)
         row=QHBoxLayout()
         self.show_source=QCheckBox("Show source model"); self.show_source.setChecked(True)
         self.show_source.toggled.connect(self.toggle_source)
@@ -866,6 +872,9 @@ class MainWindow(QMainWindow):
             self._frame_preview()
             self.export_selected.setEnabled(True); self.export_all.setEnabled(True)
             self.export_exploded.setEnabled(True); self.export_plug.setEnabled(True)
+            self.explode_btn.setEnabled(True)
+            self.explode.setValue(0)
+            self.explode_btn.setText("EXPLODE MOLD")
             self.status.setText(f"Generated 1 fitted base + {len(parts)-1} interlocking cavity panels. "
                                 f"Fill hole: {self.fill_dia.value():.1f} mm × {self.fill_depth.value():.1f} mm.")
         except Exception as e:
@@ -875,8 +884,23 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor(); self.progress.hide(); self.generate_btn.setEnabled(True)
 
+    def toggle_exploded_view(self):
+        """Toggle between the assembled mold and the fully exploded preview."""
+        if not self.generator.parts:
+            return
+        if self.explode.value() > 0:
+            self.explode.setValue(0)
+            self.explode_btn.setText("EXPLODE MOLD")
+        else:
+            self.explode.setValue(100)
+            self.explode_btn.setText("ASSEMBLE MOLD")
+
     def apply_explode(self,value):
         self.explode_value=value; self.explode_label.setText(f"{value}%")
+        if hasattr(self, "explode_btn"):
+            self.explode_btn.setText(
+                "ASSEMBLE MOLD" if value > 0 else "EXPLODE MOLD"
+            )
         if not self.generator.parts: return
         # Rebuild preview actors at their exploded positions.
         for actor in self.part_actors + [a for a in self.outline_actors if a is not None]:
