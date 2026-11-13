@@ -33,6 +33,12 @@ or double click the python file
 
 
 
-
-
+Standalone Version
+BUILD ON WINDOWS
+----------------
+1. Use 64-bit Python 3.12 and enable the Python Launcher.
+2. Extract this entire ZIP into a normal folder.
+3. Double-click build_windows.bat and wait for BUILD COMPLETE.
+4. The application folder will be:
+   dist\MadHat_Negative_Mold_Generator\
 
