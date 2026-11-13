@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QLabel, QPushButton, QFileDialog, QDoubleSpinBox, QSpinBox,
     QComboBox, QSlider, QCheckBox, QListWidget, QListWidgetItem, QMessageBox,
-    QProgressBar, QSplitter, QScrollArea, QFrame
+    QProgressBar, QSplitter, QScrollArea, QFrame, QTabWidget
 )
 try:
     from pyvistaqt import QtInteractor
@@ -701,147 +701,230 @@ class MainWindow(QMainWindow):
         self._style()
 
     def _build_ui(self):
-        root=QWidget(); layout=QHBoxLayout(root)
-        split=QSplitter(Qt.Horizontal)
-        left=QWidget(); side=QVBoxLayout(left)
-        side.setContentsMargins(12,12,12,12)
-        title=QLabel("MAD HAT · NEGATIVE MOLD GENERATOR")
-        title.setStyleSheet(f"font-size:19px;font-weight:bold;color:{GOLD}")
-        side.addWidget(title)
-        subtitle=QLabel("Multi-piece negative cavity mold generator · Python desktop")
-        subtitle.setStyleSheet("color:#aaa")
-        side.addWidget(subtitle)
+        root = QWidget()
+        root_layout = QHBoxLayout(root)
+        root_layout.setContentsMargins(10, 10, 10, 10)
 
-        source=QGroupBox("1 · Source model"); sf=QVBoxLayout(source)
-        self.load_btn=QPushButton("UPLOAD STL MODEL")
+        split = QSplitter(Qt.Horizontal)
+        split.setChildrenCollapsible(False)
+
+        # Left control workspace
+        left = QWidget()
+        side = QVBoxLayout(left)
+        side.setContentsMargins(14, 14, 14, 14)
+        side.setSpacing(12)
+
+        header = QFrame()
+        header.setObjectName("appHeader")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(14, 12, 14, 12)
+        title = QLabel("MAD HAT")
+        title.setObjectName("appTitle")
+        subtitle = QLabel("NEGATIVE MOLD GENERATOR  ·  DESKTOP")
+        subtitle.setObjectName("appSubtitle")
+        header_layout.addWidget(title)
+        header_layout.addWidget(subtitle)
+        side.addWidget(header)
+
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        side.addWidget(tabs, 1)
+
+        # --- Build tab: source model, mould settings and silicone estimate ---
+        build_page = QWidget()
+        build_layout = QVBoxLayout(build_page)
+        build_layout.setContentsMargins(8, 12, 8, 8)
+        build_layout.setSpacing(12)
+
+        source = QGroupBox("01  ·  SOURCE MODEL")
+        sf = QVBoxLayout(source)
+        sf.setSpacing(8)
+        self.model_info = QLabel("No model loaded.\nUpload an STL to get started.")
+        self.model_info.setObjectName("modelInfo")
+        self.model_info.setWordWrap(True)
+        sf.addWidget(self.model_info)
+
+        source_actions = QHBoxLayout()
+        self.load_btn = QPushButton("UPLOAD STL")
+        self.load_btn.setObjectName("primaryButton")
         self.load_btn.clicked.connect(self.load_stl)
-        sf.addWidget(self.load_btn)
-        self.delete_stl_btn = QPushButton("DELETE STL")
+        source_actions.addWidget(self.load_btn, 2)
+
+        self.delete_stl_btn = QPushButton("DELETE")
         self.delete_stl_btn.setEnabled(False)
         self.delete_stl_btn.clicked.connect(self.delete_stl)
-        sf.addWidget(self.delete_stl_btn)
+        source_actions.addWidget(self.delete_stl_btn, 1)
+        sf.addLayout(source_actions)
+
+        project_actions = QHBoxLayout()
         self.save_project_btn = QPushButton("SAVE PROJECT")
         self.save_project_btn.setEnabled(False)
         self.save_project_btn.clicked.connect(self.save_project)
-        sf.addWidget(self.save_project_btn)
-        self.load_project_btn = QPushButton("LOAD PROJECT")
+        project_actions.addWidget(self.save_project_btn)
+        self.load_project_btn = QPushButton("OPEN PROJECT")
         self.load_project_btn.clicked.connect(self.load_project)
-        sf.addWidget(self.load_project_btn)
-        self.model_info=QLabel("No model loaded."); self.model_info.setWordWrap(True)
-        sf.addWidget(self.model_info); side.addWidget(source)
+        project_actions.addWidget(self.load_project_btn)
+        sf.addLayout(project_actions)
+        build_layout.addWidget(source)
 
-        opts=QGroupBox("2 · Mold layout"); form=QFormLayout(opts)
+        opts = QGroupBox("02  ·  MOULD CONFIGURATION")
+        form = QFormLayout(opts)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setFormAlignment(Qt.AlignTop)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
+
         self.mold_style = QComboBox()
         self.mold_style.addItem("Multi-piece 3D mold", "multi")
         self.mold_style.addItem("2D flat pour mold", "flat")
-        form.addRow("Mold type", self.mold_style)
-        self.panel_count=QComboBox()
-        for n in (4,5,6,8): self.panel_count.addItem(f"{n} panels",n)
-        self.top_extra=self.spin(8,0,100,1)
-        self.wall=self.spin(8,3,100,1)
-        self.base=self.spin(6,3,100,1)
-        self.clearance=self.spin(3,0,20,.1)
-        self.fill_dia=self.spin(12,2,50,.5)
-        self.fill_depth=self.spin(20,1,500,1)
-        form.addRow("Removable side panels",self.panel_count)
-        form.addRow("Panel height extra (mm)",self.top_extra)
-        form.addRow("Wall thickness (mm)",self.wall)
-        form.addRow("Base thickness (mm)",self.base)
-        form.addRow("Cavity clearance (mm)",self.clearance)
-        form.addRow("Silicone fill hole diameter (mm)",self.fill_dia)
-        form.addRow("Fill hole depth (mm)",self.fill_depth)
-        side.addWidget(opts)
+        form.addRow("Mould type", self.mold_style)
 
-        # Capacity panel: reports the cavity's calculated resin volume after
-        # generation, plus a practical 10% allowance for mixing/pouring loss.
-        capacity = QGroupBox("3 · Mold capacity / Silicone required")
+        self.panel_count = QComboBox()
+        for n in (2, 4, 5, 6, 8):
+            self.panel_count.addItem(f"{n} panels", n)
+        self.top_extra = self.spin(8, 0, 100, 1)
+        self.wall = self.spin(8, 3, 100, 1)
+        self.base = self.spin(6, 3, 100, 1)
+        self.clearance = self.spin(3, 0, 20, .1)
+        self.fill_dia = self.spin(12, 2, 50, .5)
+        self.fill_depth = self.spin(20, 1, 500, 1)
+
+        form.addRow("Removable panels", self.panel_count)
+        form.addRow("Top height extra (mm)", self.top_extra)
+        form.addRow("Wall thickness (mm)", self.wall)
+        form.addRow("Base thickness (mm)", self.base)
+        form.addRow("Cavity clearance (mm)", self.clearance)
+        form.addRow("Fill hole diameter (mm)", self.fill_dia)
+        form.addRow("Fill hole depth (mm)", self.fill_depth)
+
+        self.generate_btn = QPushButton("GENERATE MOLD")
+        self.generate_btn.setObjectName("primaryButton")
+        self.generate_btn.setMinimumHeight(42)
+        self.generate_btn.setEnabled(False)
+        self.generate_btn.clicked.connect(self.generate)
+        form.addRow(self.generate_btn)
+
+        self.generation_readout = QLabel("Ready to generate.")
+        self.generation_readout.setObjectName("generationReadout")
+        self.generation_readout.setWordWrap(True)
+        form.addRow(self.generation_readout)
+
+        self.status = QLabel("Upload an STL to begin.")
+        self.status.setObjectName("statusLabel")
+        self.status.setWordWrap(True)
+        form.addRow(self.status)
+        build_layout.addWidget(opts)
+
+        capacity = QGroupBox("03  ·  SILICONE REQUIRED")
         capacity_layout = QVBoxLayout(capacity)
+        capacity_layout.setSpacing(7)
         self.capacity_volume = QLabel("Silicone gap required: —")
         self.capacity_channel = QLabel("Pour channel volume: —")
         self.capacity_total = QLabel("Total silicone required: —")
         self.capacity_extra = QLabel("Mixing amount (+10%): —")
-        self.capacity_volume.setStyleSheet(
-            "font-size:16px;font-weight:bold;color:#f0a500;padding:3px;")
-        self.capacity_channel.setStyleSheet(
-            "font-size:13px;color:#ddd;padding:3px;")
-        self.capacity_total.setStyleSheet(
-            "font-size:15px;font-weight:bold;color:#f0a500;padding:3px;")
-        self.capacity_extra.setStyleSheet(
-            "font-size:14px;font-weight:bold;color:#75d6a3;padding:3px;")
+        self.capacity_volume.setObjectName("capacityDetail")
+        self.capacity_channel.setObjectName("capacityDetail")
+        self.capacity_total.setObjectName("capacityTotal")
+        self.capacity_extra.setObjectName("capacityMix")
         self.capacity_note = QLabel(
-            "Adds the silicone gap around the STL to the pour channel volume. "
-            "The channel overlap with the expanded model is excluded to "
-            "avoid double-counting. Values are shown in mL and litres.")
+            "Includes the silicone gap and pour channel without double-counting "
+            "their overlap. Values are shown in mL and litres.")
         self.capacity_note.setWordWrap(True)
-        self.capacity_note.setStyleSheet("color:#999;font-size:11px;")
-        capacity_layout.addWidget(self.capacity_volume)
-        capacity_layout.addWidget(self.capacity_channel)
-        capacity_layout.addWidget(self.capacity_total)
-        capacity_layout.addWidget(self.capacity_extra)
-        capacity_layout.addWidget(self.capacity_note)
-        side.addWidget(capacity)
+        self.capacity_note.setObjectName("mutedText")
+        for label in (self.capacity_volume, self.capacity_channel,
+                      self.capacity_total, self.capacity_extra, self.capacity_note):
+            capacity_layout.addWidget(label)
+        build_layout.addWidget(capacity)
+        build_layout.addStretch(1)
+        tabs.addTab(build_page, "BUILD")
 
-        self.generate_btn=QPushButton("GENERATE MOLD")
-        self.generate_btn.setEnabled(False); self.generate_btn.clicked.connect(self.generate)
-        side.addWidget(self.generate_btn)
-        self.status=QLabel("Upload an STL to begin."); self.status.setWordWrap(True)
-        side.addWidget(self.status)
+        # --- Preview tab: visibility, exploded view and export tools ---
+        preview_page = QWidget()
+        preview_layout = QVBoxLayout(preview_page)
+        preview_layout.setContentsMargins(8, 12, 8, 8)
+        preview_layout.setSpacing(12)
 
-        exp=QGroupBox("4 · Exploded view / export"); ef=QVBoxLayout(exp)
-        self.explode=QSlider(Qt.Horizontal); self.explode.setRange(0,100)
+        exp = QGroupBox("04  ·  PREVIEW CONTROLS")
+        ef = QVBoxLayout(exp)
+        ef.setSpacing(9)
+        self.show_source = QCheckBox("Show original STL / plug")
+        self.show_source.setChecked(True)
+        self.show_source.toggled.connect(self.toggle_source)
+        ef.addWidget(self.show_source)
+
+        ef.addWidget(QLabel("Explode amount"))
+        self.explode = QSlider(Qt.Horizontal)
+        self.explode.setRange(0, 100)
         self.explode.valueChanged.connect(self.apply_explode)
-        ef.addWidget(QLabel("Explode amount")); ef.addWidget(self.explode)
-        self.explode_label=QLabel("0%"); ef.addWidget(self.explode_label)
+        ef.addWidget(self.explode)
+        self.explode_label = QLabel("0%")
+        self.explode_label.setObjectName("explodeValue")
+        ef.addWidget(self.explode_label)
 
-        # One-click control to spread the generated mold parts apart.
-        self.explode_btn = QPushButton("EXPLODE MOLD")
+        self.explode_btn = QPushButton("EXPLODE MOULD")
+        self.explode_btn.setObjectName("primaryButton")
         self.explode_btn.setEnabled(False)
         self.explode_btn.clicked.connect(self.toggle_exploded_view)
         ef.addWidget(self.explode_btn)
-        row=QHBoxLayout()
-        self.show_source=QCheckBox("Show source model"); self.show_source.setChecked(True)
-        self.show_source.toggled.connect(self.toggle_source)
-        self.show_source_edges=QCheckBox("Show STL edges"); self.show_source_edges.setChecked(True)
-        self.show_source_edges.toggled.connect(self.toggle_source_edges)
-        row.addWidget(self.show_source)
-        row.addWidget(self.show_source_edges)
-        ef.addLayout(row)
-        self.show_outlines=QCheckBox("Show wall outlines")
-        self.show_outlines.setChecked(True)
-        self.show_outlines.toggled.connect(self.toggle_outlines)
-        ef.addWidget(self.show_outlines)
-        preview_hint=QLabel("Shaded surfaces, dark feature edges and an isometric view make the wall shape easier to read.")
-        preview_hint.setWordWrap(True)
-        preview_hint.setStyleSheet("color:#999;font-size:11px;")
-        ef.addWidget(preview_hint)
-        self.visibility=QListWidget(); self.visibility.itemChanged.connect(self.visibility_changed)
-        ef.addWidget(self.visibility)
-        self.export_selected=QPushButton("EXPORT SELECTED PART STL")
-        self.export_selected.clicked.connect(self.export_one); ef.addWidget(self.export_selected)
-        self.export_all=QPushButton("EXPORT ALL PARTS (ZIP)")
-        self.export_all.clicked.connect(self.export_all_parts); ef.addWidget(self.export_all)
-        self.export_exploded=QPushButton("EXPORT EXPLODED MOLD (ZIP)")
-        self.export_exploded.clicked.connect(self.export_exploded_parts); ef.addWidget(self.export_exploded)
-        self.export_plug=QPushButton("EXPORT LOCATED ORIGINAL PLUG STL")
-        self.export_plug.clicked.connect(self.export_plug_stl); ef.addWidget(self.export_plug)
-        for b in (self.export_selected,self.export_all,self.export_exploded,self.export_plug):
-            b.setEnabled(False)
-        side.addWidget(exp,1)
 
-        self.progress=QProgressBar(); self.progress.setRange(0,0); self.progress.hide()
+        hint = QLabel("Use the list below to show or hide individual mold parts. "
+                      "Hidden parts remain hidden while exploding the assembly.")
+        hint.setWordWrap(True)
+        hint.setObjectName("mutedText")
+        ef.addWidget(hint)
+        preview_layout.addWidget(exp)
+
+        parts_group = QGroupBox("PART VISIBILITY")
+        parts_layout = QVBoxLayout(parts_group)
+        parts_layout.setContentsMargins(10, 18, 10, 10)
+        parts_layout.setSpacing(4)
+        self.visibility = QListWidget()
+        self.visibility.setUniformItemSizes(True)
+        self.visibility.setSpacing(1)
+        self.visibility.itemChanged.connect(self.visibility_changed)
+
+        # The largest supported assembly is one base plus eight panels.
+        # Size the list to show exactly those nine entries without leaving
+        # a large empty area when fewer parts (or a flat mould) are generated.
+        max_visible_parts = 1 + max(
+            self.panel_count.itemData(i)
+            for i in range(self.panel_count.count())
+        )
+        row_height = self.visibility.fontMetrics().height() + 10
+        self.visibility.setFixedHeight(max_visible_parts * row_height + 10)
+
+        parts_layout.addWidget(self.visibility)
+
+        # Keep the outer group background/border snug around the resized list.
+        # This includes the title area and the layout's inner margins.
+        parts_group.setFixedHeight(self.visibility.height() + 18 + 10 + 10 + 12)
+        preview_layout.addWidget(parts_group)
+
+        export_group = QGroupBox("EXPORT")
+        export_layout = QVBoxLayout(export_group)
+        self.export_selected = QPushButton("EXPORT SELECTED PART  ·  STL")
+        self.export_selected.clicked.connect(self.export_one)
+        export_layout.addWidget(self.export_selected)
+        self.export_all = QPushButton("EXPORT ALL PARTS  ·  ZIP")
+        self.export_all.clicked.connect(self.export_all_parts)
+        export_layout.addWidget(self.export_all)
+        self.export_exploded = QPushButton("EXPORT EXPLODED MOULD  ·  ZIP")
+        self.export_exploded.clicked.connect(self.export_exploded_parts)
+        export_layout.addWidget(self.export_exploded)
+        self.export_plug = QPushButton("EXPORT LOCATED ORIGINAL PLUG  ·  STL")
+        self.export_plug.clicked.connect(self.export_plug_stl)
+        export_layout.addWidget(self.export_plug)
+        for button in (self.export_selected, self.export_all,
+                       self.export_exploded, self.export_plug):
+            button.setEnabled(False)
+        preview_layout.addWidget(export_group)
+        tabs.addTab(preview_page, "PREVIEW & EXPORT")
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.hide()
         side.addWidget(self.progress)
-        side.addStretch(1)
 
-        self.plotter=QtInteractor(self)
-        self.plotter.set_background("#11151b", top="#28313d")
-        self.plotter.add_axes(line_width=2, color="#d7dde5")
-        self.plotter.show_grid(color="#39424e")
-        try:
-            self.plotter.enable_anti_aliasing("ssaa")
-        except Exception:
-            pass
-        # Put the complete settings/control panel inside a vertical scroll area so
-        # every setting remains accessible on shorter screens.
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
         settings_scroll.setFrameShape(QFrame.NoFrame)
@@ -849,9 +932,27 @@ class MainWindow(QMainWindow):
         settings_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         settings_scroll.setWidget(left)
 
-        split.addWidget(settings_scroll); split.addWidget(self.plotter.interactor)
-        split.setSizes([370,1100])
-        layout.addWidget(split)
+        # Main 3D viewport
+        viewport = QFrame()
+        viewport.setObjectName("viewportFrame")
+        viewport_layout = QVBoxLayout(viewport)
+        viewport_layout.setContentsMargins(0, 0, 0, 0)
+        self.plotter = QtInteractor(self)
+        self.plotter.set_background("#111821", top="#263342")
+        self.plotter.add_axes(line_width=2, color="#d7dde5")
+        self.plotter.show_grid(color="#394958")
+        try:
+            self.plotter.enable_anti_aliasing("ssaa")
+        except Exception:
+            pass
+        viewport_layout.addWidget(self.plotter.interactor)
+
+        split.addWidget(settings_scroll)
+        split.addWidget(viewport)
+        split.setSizes([430, 1070])
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        root_layout.addWidget(split)
         self.setCentralWidget(root)
 
     @staticmethod
@@ -862,23 +963,121 @@ class MainWindow(QMainWindow):
 
     def _style(self):
         self.setStyleSheet("""
-            QMainWindow,QWidget { background:#151515; color:#eee; font:13px Arial; }
-            QGroupBox { border:1px solid #444; border-radius:7px; margin-top:10px;
-                        padding:9px; font-weight:bold; color:#f0a500; }
-            QGroupBox::title { subcontrol-origin:margin; left:9px; padding:0 4px; }
-            QPushButton { background:#353535; color:#fff; border:1px solid #555;
-                          border-radius:6px; padding:8px; font-weight:bold; }
-            QPushButton:hover { border-color:#f0a500; }
-            QPushButton:disabled { color:#777; }
-            QDoubleSpinBox,QComboBox,QListWidget { background:#101010; color:#fff;
-                border:1px solid #444; border-radius:5px; padding:5px; }
-            QSlider { accent-color:#f0a500; }
-            QScrollArea { border: none; }
-            QScrollBar:vertical { background:#101010; width:12px; margin:2px; border-radius:5px; }
-            QScrollBar::handle:vertical { background:#666; min-height:28px; border-radius:5px; }
-            QScrollBar::handle:vertical:hover { background:#f0a500; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
+            QMainWindow, QWidget {
+                background: #151a20; color: #e8edf2; font: 13px "Segoe UI";
+            }
+            QFrame#appHeader {
+                background: #202832; border: 1px solid #35414d;
+                border-radius: 10px;
+            }
+            QLabel#appTitle {
+                color: #f0a500; font-size: 23px; font-weight: 800;
+                letter-spacing: 1px;
+            }
+            QLabel#appSubtitle {
+                color: #9eabb8; font-size: 10px; font-weight: 700;
+                letter-spacing: 1.4px;
+            }
+            QTabWidget::pane {
+                border: 1px solid #303b46; border-radius: 8px;
+                background: #181f27; top: -1px;
+            }
+            QTabBar::tab {
+                background: #222b35; color: #aeb9c4; padding: 10px 18px;
+                margin-right: 4px; border-top-left-radius: 6px;
+                border-top-right-radius: 6px; font-weight: 700;
+            }
+            QTabBar::tab:selected {
+                color: #f0a500; background: #303b46;
+                border-bottom: 2px solid #f0a500;
+            }
+            QGroupBox {
+                background: #1d252e; border: 1px solid #35414d;
+                border-radius: 8px; margin-top: 12px; padding: 12px;
+                font-weight: 700; color: #f0a500;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin; left: 11px; padding: 0 5px;
+            }
+            QLabel#modelInfo {
+                background: #151c23; border: 1px solid #303b46;
+                border-radius: 6px; padding: 10px; color: #c4ced8;
+            }
+            QLabel#generationReadout {
+                color: #f0a500; font-size: 11px; font-weight: 700;
+                background: #151c23; border: 1px solid #35414d;
+                border-radius: 6px; padding: 9px;
+            }
+            QLabel#statusLabel {
+                color: #aeb9c4; font-size: 11px; padding: 6px 2px;
+            }
+            QLabel#mutedText { color: #8f9ba7; font-size: 11px; }
+            QLabel#capacityDetail { color: #d3dce5; padding: 2px; }
+            QLabel#capacityTotal {
+                color: #f0a500; font-size: 15px; font-weight: 800;
+                padding: 5px 2px;
+            }
+            QLabel#capacityMix {
+                color: #75d6a3; font-size: 14px; font-weight: 800;
+                background: #1b302a; border-radius: 5px; padding: 8px;
+            }
+            QLabel#explodeValue {
+                color: #f0a500; font-weight: 800; font-size: 15px;
+            }
+            QPushButton {
+                background: #303b46; color: #edf2f6;
+                border: 1px solid #465361; border-radius: 6px;
+                padding: 9px 10px; font-weight: 700;
+            }
+            QPushButton:hover {
+                background: #3a4855; border-color: #f0a500;
+            }
+            QPushButton:pressed { background: #202a33; }
+            QPushButton:disabled {
+                background: #222930; color: #68737e; border-color: #303840;
+            }
+            QPushButton#primaryButton {
+                background: #d99500; color: #171717; border: 1px solid #f0a500;
+                font-weight: 900;
+            }
+            QPushButton#primaryButton:hover { background: #ffb81c; }
+            QDoubleSpinBox, QComboBox, QListWidget {
+                background: #11171d; color: #edf2f6;
+                border: 1px solid #3b4753; border-radius: 5px; padding: 6px;
+                selection-background-color: #75530b;
+            }
+            QDoubleSpinBox:focus, QComboBox:focus, QListWidget:focus {
+                border: 1px solid #f0a500;
+            }
+            QCheckBox { spacing: 8px; color: #dce3e9; }
+            QCheckBox::indicator {
+                width: 16px; height: 16px; border: 1px solid #667482;
+                border-radius: 3px; background: #11171d;
+            }
+            QCheckBox::indicator:checked {
+                background: #f0a500; border-color: #f0a500;
+            }
+            QSlider { accent-color: #f0a500; }
+            QProgressBar {
+                background: #11171d; border: 1px solid #35414d;
+                border-radius: 4px; height: 8px;
+            }
+            QProgressBar::chunk { background: #f0a500; border-radius: 4px; }
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical {
+                background: #11171d; width: 11px; margin: 2px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: #53616e; min-height: 28px; border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover { background: #f0a500; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
         """)
 
     def _add_source_preview(self):
@@ -911,25 +1110,24 @@ class MainWindow(QMainWindow):
             name="source",
         )
         self.source_edge_actor = None
-        if self.show_source_edges.isChecked():
-            try:
-                edges = source_poly.extract_feature_edges(
-                    feature_angle=8,
-                    boundary_edges=True,
-                    non_manifold_edges=True,
-                    feature_edges=True,
-                    manifold_edges=False,
+        try:
+            edges = source_poly.extract_feature_edges(
+                feature_angle=8,
+                boundary_edges=True,
+                non_manifold_edges=True,
+                feature_edges=True,
+                manifold_edges=False,
+            )
+            if edges.n_cells:
+                self.source_edge_actor = self.plotter.add_mesh(
+                    edges,
+                    color="#073b3d",
+                    line_width=2.0,
+                    render_lines_as_tubes=True,
+                    name="source_feature_edges",
                 )
-                if edges.n_cells:
-                    self.source_edge_actor = self.plotter.add_mesh(
-                        edges,
-                        color="#073b3d",
-                        line_width=2.0,
-                        render_lines_as_tubes=True,
-                        name="source_feature_edges",
-                    )
-            except Exception:
-                self.source_edge_actor = None
+        except Exception:
+            self.source_edge_actor = None
 
     def _add_part_preview(self, mesh, part, index):
         """Add a lit Z-up preview copy and feature-edge overlay."""
@@ -964,7 +1162,7 @@ class MainWindow(QMainWindow):
                     render_lines_as_tubes=True,
                     name=f"{part.name}_feature_edges",
                 )
-                outline.SetVisibility(self.show_outlines.isChecked())
+                outline.SetVisibility(True)
         except Exception:
             # The shaded solid remains usable if a PyVista version cannot
             # extract feature edges with these options.
@@ -1004,8 +1202,6 @@ class MainWindow(QMainWindow):
             },
             "preview": {
                 "show_source": self.show_source.isChecked(),
-                "show_source_edges": self.show_source_edges.isChecked(),
-                "show_outlines": self.show_outlines.isChecked(),
                 "explode": self.explode.value()
             }
         }
@@ -1117,8 +1313,6 @@ class MainWindow(QMainWindow):
 
             preview = settings.get("preview", {})
             self.show_source.setChecked(bool(preview.get("show_source", True)))
-            self.show_source_edges.setChecked(bool(preview.get("show_source_edges", True)))
-            self.show_outlines.setChecked(bool(preview.get("show_outlines", True)))
             self.plotter.clear()
             self.part_actors = []
             self.outline_actors = []
@@ -1227,22 +1421,44 @@ class MainWindow(QMainWindow):
         self.status.setText("STL deleted. Upload a new STL to begin.")
         self._frame_preview()
 
+    def _generation_progress(self, message):
+        """Update the live progress readout while geometry is being built."""
+        percent = 5
+        if "Building fitted base" in message:
+            percent = 30
+        elif "Generating cavity panel" in message:
+            try:
+                current, total = message.split("panel", 1)[1].strip().split("/", 1)
+                current = int(current)
+                total = max(1, int(total.split("…", 1)[0].strip()))
+                percent = 30 + int(55 * current / total)
+            except (ValueError, IndexError):
+                percent = 35
+        elif "Building flat mold" in message:
+            percent = 45
+        self.generation_readout.setText(f"{percent}%  ·  {message}")
+        self.status.setText(message)
+        QApplication.processEvents()
+
     def generate(self):
-        self.generate_btn.setEnabled(False); self.progress.show()
+        self.generate_btn.setEnabled(False)
+        self.generation_readout.setText("5%  ·  Preparing mould generation…")
+        self.progress.show()
         QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
         try:
             self.plotter.clear()
             if self.mold_style.currentData() == "flat":
                 parts = self.generator.generate_flat_2d(
                     wall=self.wall.value(), base=self.base.value(),
                     top_extra=self.top_extra.value(), margin=10.0,
-                    progress=lambda msg: self.status.setText(msg))
+                    progress=self._generation_progress)
             else:
                 parts=self.generator.generate(
                     panels=self.panel_count.currentData(),top_extra=self.top_extra.value(),
                     wall=self.wall.value(),base=self.base.value(),clearance=self.clearance.value(),
                     fill_diameter=self.fill_dia.value(),fill_depth=self.fill_depth.value(),
-                    progress=lambda msg:self.status.setText(msg))
+                    progress=self._generation_progress)
             self.part_actors=[]
             self.outline_actors=[]
             self.visibility.clear()
@@ -1292,10 +1508,12 @@ class MainWindow(QMainWindow):
             else:
                 self.status.setText(f"Generated 1 fitted base + {len(parts)-1} interlocking cavity panels. "
                                     f"Fill hole: {self.fill_dia.value():.1f} mm × {self.fill_depth.value():.1f} mm.")
+            self.generation_readout.setText("100%  ·  Mould generation complete.")
         except Exception as e:
             traceback.print_exc()
             QMessageBox.critical(self,"Mold generation failed",str(e))
             self.status.setText("Generation failed. Try fewer panels or a simpler watertight STL.")
+            self.generation_readout.setText("Generation failed. See the error message above.")
         finally:
             QApplication.restoreOverrideCursor(); self.progress.hide(); self.generate_btn.setEnabled(True)
 
@@ -1325,9 +1543,22 @@ class MainWindow(QMainWindow):
         self.outline_actors=[]
         distance=(value/100)*(self.wall.value()+max(12,max(self.generator.source.extents)*.12))
         for i,part in enumerate(self.generator.parts):
+            # Preserve each part's checkbox state when rebuilding actors for
+            # the new exploded position. Re-creating an actor defaults it to
+            # visible, so explicitly restore the user's visibility choice.
+            item = self.visibility.item(i) if i < self.visibility.count() else None
+            part_visible = (
+                item is None or item.checkState() == Qt.Checked
+            )
+
             mesh=part.mesh.copy()
             if i: mesh.apply_translation(np.array(part.direction)*distance)
             surface, outline = self._add_part_preview(mesh, part, i)
+
+            surface.SetVisibility(part_visible)
+            if outline is not None:
+                outline.SetVisibility(part_visible)
+
             self.part_actors.append(surface)
             self.outline_actors.append(outline)
         self.plotter.render()
@@ -1338,7 +1569,7 @@ class MainWindow(QMainWindow):
             visible = item.checkState()==Qt.Checked
             self.part_actors[idx].SetVisibility(visible)
             if idx < len(self.outline_actors) and self.outline_actors[idx] is not None:
-                self.outline_actors[idx].SetVisibility(visible and self.show_outlines.isChecked())
+                self.outline_actors[idx].SetVisibility(visible)
             self.plotter.render()
 
     def toggle_source(self,checked):
@@ -1352,47 +1583,6 @@ class MainWindow(QMainWindow):
         self.source_edge_actor = None
         if checked:
             self._add_source_preview()
-        self.plotter.render()
-
-    def toggle_source_edges(self,checked):
-        try:
-            self.plotter.remove_actor("source_feature_edges", render=False)
-        except Exception:
-            pass
-        self.source_edge_actor = None
-        if checked and self.show_source.isChecked() and self.generator.source is not None:
-            try:
-                preview_mesh = (self.generator.plug.copy()
-                                if self.generator.plug is not None
-                                else self.generator.source.copy())
-                if self.generator.parts:
-                    preview_mesh.apply_translation([
-                        0, self.generator.base_top + self.generator.lift_y, 0
-                    ])
-                preview_mesh = transform_to_preview(preview_mesh)
-                edges = pv.wrap(preview_mesh).extract_feature_edges(
-                    feature_angle=8,
-                    boundary_edges=True,
-                    non_manifold_edges=True,
-                    feature_edges=True,
-                    manifold_edges=False,
-                )
-                if edges.n_cells:
-                    self.source_edge_actor = self.plotter.add_mesh(
-                        edges, color="#073b3d", line_width=2.0,
-                        render_lines_as_tubes=True, name="source_feature_edges")
-            except Exception:
-                self.source_edge_actor = None
-        self.plotter.render()
-
-    def toggle_outlines(self,checked):
-        # Outlines are independent actors, so they can be switched off without
-        # changing the STL geometry or the exported meshes.
-        for i,actor in enumerate(self.outline_actors):
-            if actor is not None:
-                part_visible = (i >= self.visibility.count() or
-                                self.visibility.item(i).checkState()==Qt.Checked)
-                actor.SetVisibility(bool(checked and part_visible))
         self.plotter.render()
 
     def export_one(self):
