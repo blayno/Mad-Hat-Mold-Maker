@@ -940,7 +940,6 @@ class MainWindow(QMainWindow):
         self.plotter = QtInteractor(self)
         self.plotter.set_background("#111821", top="#263342")
         self.plotter.add_axes(line_width=2, color="#d7dde5")
-        self.plotter.show_grid(color="#394958")
         try:
             self.plotter.enable_anti_aliasing("ssaa")
         except Exception:
@@ -1170,7 +1169,69 @@ class MainWindow(QMainWindow):
         return surface, outline
 
     def _frame_preview(self):
+        # Build a dimensioned XYZ grid from the currently displayed geometry.
+        # Preview coordinates are Z-up: X = width, Y = length, Z = height.
+        bounds_meshes = []
+        if self.generator.parts:
+            distance = (self.explode.value() / 100) * (
+                self.wall.value() + max(12, max(self.generator.source.extents) * .12)
+            )
+            for i, part in enumerate(self.generator.parts):
+                mesh = transform_to_preview(part.mesh)
+                if i:
+                    mesh.apply_translation(np.asarray(part.direction) * distance)
+                bounds_meshes.append(mesh)
+            if self.generator.source is not None and self.show_source.isChecked():
+                source = (self.generator.plug.copy()
+                          if self.generator.plug is not None
+                          else self.generator.source.copy())
+                source.apply_translation([
+                    0, self.generator.base_top + self.generator.lift_y, 0
+                ] if self.generator.parts else [0, 0, 0])
+                bounds_meshes.append(transform_to_preview(source))
+        elif self.generator.source is not None:
+            bounds_meshes.append(transform_to_preview(self.generator.source))
+
         self.plotter.add_axes(line_width=2, color="#d7dde5")
+        if bounds_meshes:
+            low = np.min([m.bounds[0] for m in bounds_meshes], axis=0)
+            high = np.max([m.bounds[1] for m in bounds_meshes], axis=0)
+            size = np.maximum(high - low, 1.0)
+            pad = np.maximum(size * .08, 2.0)
+            bounds = (
+                low[0] - pad[0], high[0] + pad[0],
+                low[1] - pad[1], high[1] + pad[1],
+                min(0.0, low[2] - pad[2]), high[2] + pad[2]
+            )
+            self.plotter.show_grid(
+                bounds=bounds,
+                xtitle="WIDTH (X) · mm",
+                ytitle="LENGTH (Y) · mm",
+                ztitle="HEIGHT (Z) · mm",
+                n_xlabels=5,
+                n_ylabels=5,
+                n_zlabels=5,
+                fmt="%.0f",
+                color="#aebbc8",
+                grid="back",
+            )
+            dimensions = (
+                f"WIDTH  {size[0]:.1f} mm     "
+                f"LENGTH  {size[1]:.1f} mm     "
+                f"HEIGHT  {size[2]:.1f} mm"
+            )
+            self.plotter.add_text(
+                dimensions, position="upper_left", font_size=10,
+                color="#f0a500", name="model_dimensions"
+            )
+        else:
+            self.plotter.show_grid(
+                xtitle="WIDTH (X) · mm",
+                ytitle="LENGTH (Y) · mm",
+                ztitle="HEIGHT (Z) · mm",
+                color="#aebbc8",
+                grid="back",
+            )
         self.plotter.reset_camera()
         try:
             self.plotter.view_isometric()
