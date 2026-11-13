@@ -692,6 +692,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MAD HAT · NEGATIVE MOLD GENERATOR")
         self.resize(1500, 900)
         self.generator=MoldGenerator()
+        self.source_original_mesh = None
         self.explode_value=0
         self.source_actor=None
         self.source_edge_actor=None
@@ -815,7 +816,26 @@ class MainWindow(QMainWindow):
         form.addRow(self.status)
         build_layout.addWidget(opts)
 
-        capacity = QGroupBox("03  ·  SILICONE REQUIRED")
+        stl_resin = QGroupBox("03  ·  RESIN REQUIRED — STL ONLY")
+        stl_resin_layout = QVBoxLayout(stl_resin)
+        stl_resin_layout.setSpacing(7)
+        self.stl_resin_volume = QLabel("Original STL volume: —")
+        self.stl_resin_fill = QLabel("Resin to fill STL: —")
+        self.stl_resin_mix = QLabel("Mixing amount (+10%): —")
+        self.stl_resin_volume.setObjectName("capacityDetail")
+        self.stl_resin_fill.setObjectName("capacityTotal")
+        self.stl_resin_mix.setObjectName("capacityMix")
+        self.stl_resin_note = QLabel(
+            "Calculates the volume inside the original watertight STL only. "
+            "Does not include the mould cavity, walls or pour channel.")
+        self.stl_resin_note.setWordWrap(True)
+        self.stl_resin_note.setObjectName("mutedText")
+        for label in (self.stl_resin_volume, self.stl_resin_fill,
+                      self.stl_resin_mix, self.stl_resin_note):
+            stl_resin_layout.addWidget(label)
+        build_layout.addWidget(stl_resin)
+
+        capacity = QGroupBox("04  ·  SILICONE REQUIRED")
         capacity_layout = QVBoxLayout(capacity)
         capacity_layout.setSpacing(7)
         self.capacity_volume = QLabel("Silicone gap required: —")
@@ -920,6 +940,65 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(export_group)
         tabs.addTab(preview_page, "PREVIEW & EXPORT")
 
+        # --- Transform tab: scale and orient the imported STL before moulding ---
+        transform_page = QWidget()
+        transform_layout = QVBoxLayout(transform_page)
+        transform_layout.setContentsMargins(8, 12, 8, 8)
+        transform_layout.setSpacing(12)
+
+        scale_group = QGroupBox("01  ·  SCALE MODEL")
+        scale_form = QFormLayout(scale_group)
+        self.uniform_scale = QCheckBox("Lock X / Y / Z scale together")
+        self.uniform_scale.setChecked(True)
+        scale_form.addRow(self.uniform_scale)
+        self.scale_x = self.spin(1.0, 0.01, 100.0, 0.05)
+        self.scale_y = self.spin(1.0, 0.01, 100.0, 0.05)
+        self.scale_z = self.spin(1.0, 0.01, 100.0, 0.05)
+        self.scale_x.valueChanged.connect(lambda value: self._sync_uniform_scale("x", value))
+        self.scale_y.valueChanged.connect(lambda value: self._sync_uniform_scale("y", value))
+        self.scale_z.valueChanged.connect(lambda value: self._sync_uniform_scale("z", value))
+        for widget in (self.scale_x, self.scale_y, self.scale_z):
+            widget.setSuffix(" ×")
+        scale_form.addRow("Width scale (X)", self.scale_x)
+        scale_form.addRow("Height scale (Y)", self.scale_y)
+        scale_form.addRow("Length scale (Z)", self.scale_z)
+        transform_layout.addWidget(scale_group)
+
+        rotate_group = QGroupBox("02  ·  ROTATE MODEL")
+        rotate_form = QFormLayout(rotate_group)
+        self.rotate_x = self.spin(0, -360, 360, 5)
+        self.rotate_y = self.spin(0, -360, 360, 5)
+        self.rotate_z = self.spin(0, -360, 360, 5)
+        for widget in (self.rotate_x, self.rotate_y, self.rotate_z):
+            widget.setSuffix("°")
+        rotate_form.addRow("Rotate X", self.rotate_x)
+        rotate_form.addRow("Rotate Y", self.rotate_y)
+        rotate_form.addRow("Rotate Z", self.rotate_z)
+        transform_layout.addWidget(rotate_group)
+
+        transform_note = QLabel(
+            "Transforms are applied to the original STL before mould generation. "
+            "The model is automatically re-centred and placed on the build plane. "
+            "Applying a new transform clears any previously generated mould so it "
+            "can be regenerated from the updated model.")
+        transform_note.setWordWrap(True)
+        transform_note.setObjectName("mutedText")
+        transform_layout.addWidget(transform_note)
+
+        self.apply_transform_btn = QPushButton("APPLY TRANSFORM")
+        self.apply_transform_btn.setObjectName("primaryButton")
+        self.apply_transform_btn.setMinimumHeight(42)
+        self.apply_transform_btn.setEnabled(False)
+        self.apply_transform_btn.clicked.connect(self.apply_model_transform)
+        transform_layout.addWidget(self.apply_transform_btn)
+
+        self.reset_transform_btn = QPushButton("RESET TRANSFORM")
+        self.reset_transform_btn.setEnabled(False)
+        self.reset_transform_btn.clicked.connect(self.reset_model_transform)
+        transform_layout.addWidget(self.reset_transform_btn)
+        transform_layout.addStretch(1)
+        tabs.addTab(transform_page, "SCALE & TRANSFORM")
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.hide()
@@ -940,6 +1019,30 @@ class MainWindow(QMainWindow):
         self.plotter = QtInteractor(self)
         self.plotter.set_background("#111821", top="#263342")
         self.plotter.add_axes(line_width=2, color="#d7dde5")
+
+        # Camera shortcuts stay above the 3D viewport while the scene updates.
+        view_bar = QFrame()
+        view_bar.setObjectName("viewToolbar")
+        view_layout = QHBoxLayout(view_bar)
+        view_layout.setContentsMargins(10, 7, 10, 7)
+        view_layout.setSpacing(6)
+        view_layout.addWidget(QLabel("VIEW"))
+        self.view_buttons = {}
+        for label in ("TOP", "FRONT", "BACK", "LEFT", "RIGHT", "ISO"):
+            button = QPushButton(label)
+            button.setObjectName("viewButton")
+            button.setCheckable(True)
+            button.setChecked(label == "ISO")
+            button.setMinimumWidth(64)
+            button.clicked.connect(
+                lambda checked=False, view=label.lower():
+                    self.set_visualiser_view(view)
+            )
+            self.view_buttons[label] = button
+            view_layout.addWidget(button)
+        view_layout.addStretch(1)
+        viewport_layout.addWidget(view_bar)
+
         try:
             self.plotter.enable_anti_aliasing("ssaa")
         except Exception:
@@ -1022,6 +1125,22 @@ class MainWindow(QMainWindow):
             }
             QLabel#explodeValue {
                 color: #f0a500; font-weight: 800; font-size: 15px;
+            }
+            QFrame#viewToolbar {
+                background: #1b242d;
+                border-bottom: 1px solid #35414d;
+            }
+            QPushButton#viewButton {
+                background: #29343f; color: #cbd5df;
+                border: 1px solid #465361; border-radius: 5px;
+                padding: 6px 12px; font-size: 11px; font-weight: 800;
+            }
+            QPushButton#viewButton:hover {
+                border-color: #f0a500; color: #ffffff;
+            }
+            QPushButton#viewButton:checked {
+                background: #d99500; color: #171717;
+                border-color: #f0a500;
             }
             QPushButton {
                 background: #303b46; color: #edf2f6;
@@ -1234,12 +1353,57 @@ class MainWindow(QMainWindow):
             )
         self.plotter.reset_camera()
         try:
-            self.plotter.view_isometric()
+            # Use the same corrected ISO direction as the ISO toolbar button.
+            # The negative Y component brings the model's front toward the viewer.
+            self.set_visualiser_view("iso")
             self.plotter.camera.up = (0, 0, 1)
             self.plotter.camera.zoom(1.12)
         except Exception:
             pass
         self.plotter.render()
+
+    def set_visualiser_view(self, view):
+        """Switch the 3D viewport to a named orthographic-style camera angle."""
+        directions = {
+            "top": (0.0, 0.0, 1.0),
+            # Keep Front aligned with the same -Y side used by the corrected ISO view.
+            "front": (0.0, -1.0, 0.0),
+            "back": (0.0, 1.0, 0.0),
+            "left": (-1.0, 0.0, 0.0),
+            "right": (1.0, 0.0, 0.0),
+            # View from the front (-Y) side so the model faces the viewer.
+            "iso": (1.0, -1.0, 0.85),
+        }
+        direction = np.asarray(directions.get(view, directions["iso"]), dtype=float)
+        direction /= np.linalg.norm(direction)
+
+        # Keep the current framing and zoom; only move the camera around its
+        # focal point. The top view uses Y as its screen-up direction.
+        try:
+            camera = self.plotter.camera
+            focal = np.asarray(camera.focal_point, dtype=float)
+            current_position = np.asarray(camera.position, dtype=float)
+            distance = float(np.linalg.norm(current_position - focal))
+            if not np.isfinite(distance) or distance < 1e-6:
+                self.plotter.reset_camera()
+                camera = self.plotter.camera
+                focal = np.asarray(camera.focal_point, dtype=float)
+                distance = float(np.linalg.norm(
+                    np.asarray(camera.position, dtype=float) - focal
+                ))
+            camera.position = tuple(focal + direction * distance)
+            camera.focal_point = tuple(focal)
+            camera.up = (0.0, 1.0, 0.0) if view == "top" else (0.0, 0.0, 1.0)
+            self.plotter.render()
+        except Exception:
+            try:
+                self.plotter.reset_camera()
+                self.plotter.render()
+            except Exception:
+                pass
+
+        for label, button in self.view_buttons.items():
+            button.setChecked(label.lower() == view)
 
     def _project_settings(self):
         """Collect all user-adjustable mold settings plus fixed alignment parameters."""
@@ -1356,6 +1520,8 @@ class MainWindow(QMainWindow):
             # booleans, so reopening a project reproduces the saved mould exactly.
             self.generator = MoldGenerator()
             self.generator.source = source
+            self.source_original_mesh = source.copy()
+            self._set_transform_controls_enabled(True)
             self.generator.parts = restored_parts
             self.generator.plug = plug
             self.generator.lift_y = float(gen_data.get("lift_y", 0.0))
@@ -1404,11 +1570,34 @@ class MainWindow(QMainWindow):
             self.explode_btn.setEnabled(has_geometry)
             self.explode.setValue(int(preview.get("explode", 0)) if has_geometry else 0)
             self._update_capacity_display()
+            self._update_stl_resin_display()
             self.status.setText(
                 f"Project loaded: {os.path.basename(path)}. "
                 "Saved mould geometry restored without regeneration.")
         except Exception as exc:
             QMessageBox.critical(self, "Load project failed", str(exc))
+
+    def _update_stl_resin_display(self):
+        """Show resin volume for the original STL solid only."""
+        source = self.generator.source
+        if source is None:
+            self.stl_resin_volume.setText("Original STL volume: —")
+            self.stl_resin_fill.setText("Resin to fill STL: —")
+            self.stl_resin_mix.setText("Mixing amount (+10%): —")
+            return
+
+        volume_mm3 = abs(float(source.volume))
+        volume_ml = volume_mm3 / 1000.0
+        mixed_ml = volume_ml * 1.10
+        self.stl_resin_volume.setText(
+            f"Original STL volume: {volume_ml:,.1f} mL "
+            f"({volume_ml / 1000.0:,.3f} L)")
+        self.stl_resin_fill.setText(
+            f"Resin to fill STL: {volume_ml:,.1f} mL "
+            f"({volume_ml / 1000.0:,.3f} L)")
+        self.stl_resin_mix.setText(
+            f"Mixing amount (+10%): {mixed_ml:,.1f} mL "
+            f"({mixed_ml / 1000.0:,.3f} L)")
 
     def _update_capacity_display(self):
         gap_ml = self.generator.cavity_volume_mm3 / 1000.0
@@ -1429,9 +1618,12 @@ class MainWindow(QMainWindow):
         if not path: return
         try:
             size=self.generator.load_stl(path)
+            self.source_original_mesh = self.generator.source.copy()
+            self._set_transform_controls_enabled(True)
             self.source_filename = os.path.basename(path)
             self.save_project_btn.setEnabled(True)
             self.model_info.setText(f"{os.path.basename(path)}\\n{size[0]:.1f} × {size[1]:.1f} × {size[2]:.1f} mm")
+            self._update_stl_resin_display()
             self.capacity_volume.setText("Silicone gap required: —")
             self.capacity_channel.setText("Pour channel volume: —")
             self.capacity_total.setText("Total silicone required: —")
@@ -1458,6 +1650,8 @@ class MainWindow(QMainWindow):
 
         # Reset all model and generated geometry while preserving the UI settings.
         self.generator = MoldGenerator()
+        self.source_original_mesh = None
+        self._set_transform_controls_enabled(False)
         self.plotter.clear()
         self.source_actor = None
         self.source_edge_actor = None
@@ -1465,6 +1659,7 @@ class MainWindow(QMainWindow):
         self.outline_actors = []
         self.visibility.clear()
         self.model_info.setText("No model loaded.")
+        self._update_stl_resin_display()
         self.capacity_volume.setText("Silicone gap required: —")
         self.capacity_channel.setText("Pour channel volume: —")
         self.capacity_total.setText("Total silicone required: —")
@@ -1481,6 +1676,103 @@ class MainWindow(QMainWindow):
             button.setEnabled(False)
         self.status.setText("STL deleted. Upload a new STL to begin.")
         self._frame_preview()
+
+    def _sync_uniform_scale(self, changed_axis, value):
+        if not self.uniform_scale.isChecked():
+            return
+        targets = {"x": self.scale_x, "y": self.scale_y, "z": self.scale_z}
+        for axis, widget in targets.items():
+            if axis != changed_axis:
+                widget.blockSignals(True)
+                widget.setValue(value)
+                widget.blockSignals(False)
+
+    def _set_transform_controls_enabled(self, enabled):
+        for widget in (self.apply_transform_btn, self.reset_transform_btn):
+            widget.setEnabled(bool(enabled))
+
+    def apply_model_transform(self):
+        """Apply scale and rotation to a fresh copy of the imported STL."""
+        if self.source_original_mesh is None:
+            return
+        try:
+            mesh = self.source_original_mesh.copy()
+            mesh.apply_scale([self.scale_x.value(),
+                              self.scale_y.value(),
+                              self.scale_z.value()])
+            centre = mesh.bounds.mean(axis=0)
+            for angle, axis in (
+                (self.rotate_x.value(), [1, 0, 0]),
+                (self.rotate_y.value(), [0, 1, 0]),
+                (self.rotate_z.value(), [0, 0, 1]),
+            ):
+                if abs(angle) > 1e-9:
+                    rotation = trimesh.transformations.rotation_matrix(
+                        math.radians(angle), axis, point=centre)
+                    mesh.apply_transform(rotation)
+
+            # Keep the application's expected coordinate convention:
+            # centred across X/Z with the bottom resting at Y=0.
+            mesh.apply_translation([
+                -mesh.bounds.mean(axis=0)[0],
+                -mesh.bounds[0, 1],
+                -mesh.bounds.mean(axis=0)[2]
+            ])
+            mesh.fix_normals()
+            if not mesh.is_watertight:
+                raise ValueError("The transformed STL is no longer watertight.")
+
+            self.generator.source = mesh
+            self.generator.parts = []
+            self.generator.plug = None
+            self.generator.profile = None
+            self.generator.lift_y = 0.0
+            self.generator.base_top = 0.0
+            self.generator.cavity_volume_mm3 = 0.0
+            self.generator.pour_channel_volume_mm3 = 0.0
+            self.generator.total_resin_volume_mm3 = 0.0
+
+            self.plotter.clear()
+            self.part_actors = []
+            self.outline_actors = []
+            self.source_actor = None
+            self.source_edge_actor = None
+            self.visibility.clear()
+            self._add_source_preview()
+            self._frame_preview()
+            self.model_info.setText(
+                f"{getattr(self, 'source_filename', 'source.stl')}  ·  TRANSFORMED\\n"
+                f"{mesh.extents[0]:.1f} × {mesh.extents[1]:.1f} × "
+                f"{mesh.extents[2]:.1f} mm")
+            self._update_stl_resin_display()
+            for label, text in (
+                (self.capacity_volume, "Silicone gap required: —"),
+                (self.capacity_channel, "Pour channel volume: —"),
+                (self.capacity_total, "Total silicone required: —"),
+                (self.capacity_extra, "Mixing amount (+10%): —"),
+            ):
+                label.setText(text)
+            for button in (self.export_selected, self.export_all,
+                           self.export_exploded, self.export_plug):
+                button.setEnabled(False)
+            self.explode_btn.setEnabled(False)
+            self.explode.setValue(0)
+            self.status.setText(
+                "STL transform applied. Generate the mould again to use the updated model.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Transform failed", str(exc))
+
+    def reset_model_transform(self):
+        if self.source_original_mesh is None:
+            return
+        for widget, value in (
+            (self.scale_x, 1.0), (self.scale_y, 1.0), (self.scale_z, 1.0),
+            (self.rotate_x, 0), (self.rotate_y, 0), (self.rotate_z, 0)
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+        self.apply_model_transform()
 
     def _generation_progress(self, message):
         """Update the live progress readout while geometry is being built."""
