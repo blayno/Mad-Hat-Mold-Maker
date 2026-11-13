@@ -2,7 +2,7 @@
 MAD HAT — Negative Mold Generator (Python desktop edition)
 
 Install:
-    py -m pip install PySide6 pyvista pyvistaqt trimesh manifold3d numpy scipy
+    py -m pip install PySide6 pyvista pyvistaqt trimesh manifold3d numpy scipy shapely
 
 Run:
     py MadHat_Negative_Mold_Generator.py
@@ -36,7 +36,7 @@ try:
 except ImportError as exc:
     raise SystemExit(
         "Missing 3D preview packages. Install with:\n"
-        "py -m pip install PySide6 pyvista pyvistaqt trimesh manifold3d numpy scipy"
+        "py -m pip install PySide6 pyvista pyvistaqt trimesh manifold3d numpy scipy shapely"
     ) from exc
 
 
@@ -617,15 +617,17 @@ class MoldGenerator:
         return self.parts
 
     def generate_flat_2d(self, wall=8.0, base=6.0, top_extra=8.0, margin=10.0,
-                        progress=None):
-        """Create a one-piece flat pour tray with the source STL as a raised positive plug.
+                         progress=None):
+        """Create a contour-following flat pour mould around the STL footprint.
 
-        The tray base and four perimeter walls form the outside boundary. The
-        original model is fused to the base, leaving a silicone-filled gap
-        between the raised model and the surrounding border.
+        The well, perimeter wall and base follow the projected X/Z silhouette
+        of the source model instead of using a rectangular box.
         """
         if self.source is None:
             raise ValueError("Load an STL first.")
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union, triangulate
+
         src = self.source.copy()
         sx, sy, sz = map(float, src.extents)
         if min(sx, sy, sz) <= 0:
@@ -635,32 +637,124 @@ class MoldGenerator:
         base = max(2.0, float(base))
         margin = max(2.0, float(margin))
         wall_height = sy + max(0.0, float(top_extra))
-        inner_x = sx + 2.0 * margin
-        inner_z = sz + 2.0 * margin
-        outer_x = inner_x + 2.0 * wall
-        outer_z = inner_z + 2.0 * wall
 
         if progress:
-            progress("Building flat mold tray and raised plug…")
-        tray = box_mesh([outer_x, base, outer_z], [0, -base / 2 + 0.2, 0])
-        # Perimeter walls sit on the base and surround the raised source model.
-        walls = [
-            box_mesh([wall, wall_height, outer_z],
-                     [-inner_x / 2 - wall / 2, wall_height / 2, 0]),
-            box_mesh([wall, wall_height, outer_z],
-                     [ inner_x / 2 + wall / 2, wall_height / 2, 0]),
-            box_mesh([inner_x, wall_height, wall],
-                     [0, wall_height / 2, -inner_z / 2 - wall / 2]),
-            box_mesh([inner_x, wall_height, wall],
-                     [0, wall_height / 2,  inner_z / 2 + wall / 2]),
-        ]
-        tray = boolean([tray] + walls + [src], "union")
+            progress("Tracing STL silhouette and building contoured mould…")
+
+        # Project every surface triangle onto the horizontal X/Z plane.
+        # The union of these projected triangles describes the model's
+        # actual footprint, including concave outlines, rather than its bounds.
+        projected = []
+        vertices = np.asarray(src.vertices)
+        for face in np.asarray(src.faces):
+            points = vertices[face][:, [0, 2]]
+            poly = Polygon(points)
+            if poly.is_valid and poly.area > 1e-7:
+                projected.append(poly)
+        if not projected:
+            raise ValueError("Could not extract a usable 2D outline from this STL.")
+
+        footprint = unary_union(projected).buffer(0)
+        if footprint.is_empty:
+            raise ValueError("The STL silhouette is empty.")
+        # A single continuous pour tray is required. If the projection has
+        # separate islands, join nearby islands using the requested margin.
+        inner_shape = footprint.buffer(margin, join_style=1).buffer(0)
+        if inner_shape.geom_type == "MultiPolygon":
+            inner_shape = unary_union(list(inner_shape.geoms)).buffer(0)
+        # Use the exterior silhouette for a clean, manufacturable tray wall.
+        if inner_shape.geom_type == "MultiPolygon":
+            inner_shape = max(inner_shape.geoms, key=lambda g: g.area)
+        inner_shape = Polygon(inner_shape.exterior).buffer(0)
+        outer_shape = inner_shape.buffer(wall, join_style=1).buffer(0)
+        if outer_shape.geom_type == "MultiPolygon":
+            outer_shape = max(outer_shape.geoms, key=lambda g: g.area)
+        outer_shape = Polygon(outer_shape.exterior).buffer(0)
+
+        def polygon_faces(poly, y, reverse=False):
+            """Triangulate a polygon cap, retaining only triangles inside it."""
+            points = []
+            faces = []
+            for tri in triangulate(poly):
+                if not poly.covers(tri.representative_point()):
+                    continue
+                coords = list(tri.exterior.coords)[:3]
+                offset = len(points)
+                points.extend([[x, y, z] for x, z in coords])
+                faces.append([offset, offset + 1, offset + 2])
+            if reverse:
+                faces = [f[::-1] for f in faces]
+            return points, faces
+
+        def extruded_polygon(poly, y0, y1):
+            """Watertight vertical extrusion of a polygon without holes."""
+            poly = Polygon(poly.exterior)
+            ring = list(poly.exterior.coords)[:-1]
+            n = len(ring)
+            verts = [[x, y0, z] for x, z in ring]
+            verts += [[x, y1, z] for x, z in ring]
+            faces = []
+            p0, f0 = polygon_faces(poly, y0, reverse=True)
+            p1, f1 = polygon_faces(poly, y1, reverse=False)
+            # Cap triangulation uses independent vertices; append those caps.
+            base0 = len(verts)
+            verts.extend(p0)
+            faces.extend([[base0 + a, base0 + b, base0 + c] for a,b,c in f0])
+            base1 = len(verts)
+            verts.extend(p1)
+            faces.extend([[base1 + a, base1 + b, base1 + c] for a,b,c in f1])
+            for i in range(n):
+                j = (i + 1) % n
+                faces.extend([[i, j, n + j], [i, n + j, n + i]])
+            mesh = trimesh.Trimesh(vertices=np.asarray(verts, dtype=float),
+                                   faces=np.asarray(faces, dtype=np.int64),
+                                   process=True)
+            mesh.fix_normals()
+            return mesh
+
+        def wall_ring_mesh(inner, outer, y0, y1):
+            """Build a closed extruded ring: top/bottom annuli and both sides."""
+            ring_poly = outer.difference(inner).buffer(0)
+            if ring_poly.geom_type == "MultiPolygon":
+                ring_poly = unary_union(list(ring_poly.geoms))
+            verts, faces = [], []
+            # Triangulated annular caps.
+            for y, reverse in ((y0, True), (y1, False)):
+                for tri in triangulate(ring_poly):
+                    if not ring_poly.covers(tri.representative_point()):
+                        continue
+                    coords = list(tri.exterior.coords)[:3]
+                    base_idx = len(verts)
+                    verts.extend([[x, y, z] for x, z in coords])
+                    face = [base_idx, base_idx+1, base_idx+2]
+                    faces.append(face[::-1] if reverse else face)
+            # Vertical faces on every exterior and interior boundary.
+            polygons = list(ring_poly.geoms) if ring_poly.geom_type == "MultiPolygon" else [ring_poly]
+            for component in polygons:
+                for boundary in [component.exterior, *component.interiors]:
+                    coords = list(boundary.coords)
+                    for a, b in zip(coords[:-1], coords[1:]):
+                        idx = len(verts)
+                        verts.extend([[a[0], y0, a[1]], [b[0], y0, b[1]],
+                                      [b[0], y1, b[1]], [a[0], y1, a[1]]])
+                        faces.extend([[idx, idx+1, idx+2], [idx, idx+2, idx+3]])
+            mesh = trimesh.Trimesh(vertices=np.asarray(verts, dtype=float),
+                                   faces=np.asarray(faces, dtype=np.int64),
+                                   process=True)
+            mesh.fix_normals()
+            return mesh
+
+        if progress:
+            progress("Forming contoured base and perimeter wall…")
+        base_mesh = extruded_polygon(outer_shape, -base + 0.2, 0.0)
+        walls_mesh = wall_ring_mesh(inner_shape, outer_shape, 0.0, wall_height)
+        tray = boolean([base_mesh, walls_mesh, src], "union")
         tray.fix_normals()
         if not tray.is_watertight:
-            raise RuntimeError("The flat mold tray did not produce a watertight solid.")
+            raise RuntimeError("The contour-following 2D mould did not produce a watertight solid.")
 
-        # Silicone occupies the rectangular well, excluding the raised STL plug.
-        well_volume = inner_x * inner_z * wall_height
+        # Silicone fills the contoured well around the raised STL plug.
+        well_volume = float(inner_shape.area) * wall_height
         self.cavity_volume_mm3 = max(0.0, well_volume - abs(float(src.volume)))
         self.pour_channel_volume_mm3 = 0.0
         self.total_resin_volume_mm3 = self.cavity_volume_mm3
@@ -668,7 +762,7 @@ class MoldGenerator:
         self.lift_y = 0.0
         self.profile = None
         self.plug = src.copy()
-        self.parts = [MoldPart("Flat_2D_Negative_Mold", tray)]
+        self.parts = [MoldPart("Flat_2D_Contoured_Negative_Mold", tray)]
         return self.parts
 
     def export_part(self, index, path):
@@ -693,6 +787,8 @@ class MainWindow(QMainWindow):
         self.resize(1500, 900)
         self.generator=MoldGenerator()
         self.source_original_mesh = None
+        self.stl_models = []
+        self.stl_model_visible = []
         self.explode_value=0
         self.source_actor=None
         self.source_edge_actor=None
@@ -746,7 +842,7 @@ class MainWindow(QMainWindow):
         sf.addWidget(self.model_info)
 
         source_actions = QHBoxLayout()
-        self.load_btn = QPushButton("UPLOAD STL")
+        self.load_btn = QPushButton("ADD STL")
         self.load_btn.setObjectName("primaryButton")
         self.load_btn.clicked.connect(self.load_stl)
         source_actions.addWidget(self.load_btn, 2)
@@ -864,6 +960,33 @@ class MainWindow(QMainWindow):
         preview_layout.setContentsMargins(8, 12, 8, 8)
         preview_layout.setSpacing(12)
 
+        stl_selection_group = QGroupBox("STL SELECTION")
+        stl_selection_layout = QVBoxLayout(stl_selection_group)
+        stl_selection_layout.setSpacing(6)
+        self.stl_selection = QListWidget()
+        self.stl_selection.setMaximumHeight(125)
+        self.stl_selection.currentRowChanged.connect(self.stl_selection_changed)
+        stl_selection_layout.addWidget(self.stl_selection)
+        stl_visibility_row = QHBoxLayout()
+        self.stl_show_btn = QPushButton("SHOW")
+        self.stl_show_btn.clicked.connect(lambda: self.set_selected_stl_visibility(True))
+        self.stl_hide_btn = QPushButton("HIDE")
+        self.stl_hide_btn.clicked.connect(lambda: self.set_selected_stl_visibility(False))
+        self.stl_show_all_btn = QPushButton("SHOW ALL")
+        self.stl_show_all_btn.clicked.connect(self.show_all_stls)
+        self.stl_delete_selected_btn = QPushButton("DELETE")
+        self.stl_delete_selected_btn.clicked.connect(self.delete_selected_stl)
+        for button in (self.stl_show_btn, self.stl_hide_btn,
+                       self.stl_show_all_btn, self.stl_delete_selected_btn):
+            button.setEnabled(False)
+            stl_visibility_row.addWidget(button)
+        stl_selection_layout.addLayout(stl_visibility_row)
+        stl_selection_hint = QLabel("Select an STL here to move, scale, rotate or duplicate it in the Transform tab.")
+        stl_selection_hint.setWordWrap(True)
+        stl_selection_hint.setObjectName("mutedText")
+        stl_selection_layout.addWidget(stl_selection_hint)
+        preview_layout.addWidget(stl_selection_group)
+
         exp = QGroupBox("04  ·  PREVIEW CONTROLS")
         ef = QVBoxLayout(exp)
         ef.setSpacing(9)
@@ -976,11 +1099,36 @@ class MainWindow(QMainWindow):
         rotate_form.addRow("Rotate Z", self.rotate_z)
         transform_layout.addWidget(rotate_group)
 
+        move_group = QGroupBox("03  ·  MOVE MODEL")
+        move_form = QFormLayout(move_group)
+        self.move_x = self.spin(0, -1000, 1000, 1)
+        self.move_y = self.spin(0, -1000, 1000, 1)
+        self.move_z = self.spin(0, -1000, 1000, 1)
+        for widget in (self.move_x, self.move_y, self.move_z):
+            widget.setSuffix(" mm")
+        move_form.addRow("Move X", self.move_x)
+        move_form.addRow("Move Y", self.move_y)
+        move_form.addRow("Move Z", self.move_z)
+        transform_layout.addWidget(move_group)
+
+        duplicate_group = QGroupBox("04  ·  DUPLICATE MODEL")
+        duplicate_layout = QVBoxLayout(duplicate_group)
+        self.duplicate_btn = QPushButton("DUPLICATE STL")
+        self.duplicate_btn.setEnabled(False)
+        self.duplicate_btn.clicked.connect(self.duplicate_model)
+        duplicate_layout.addWidget(self.duplicate_btn)
+        self.duplicate_note = QLabel(
+            "Adds another copy of the STL beside the current model. "
+            "The duplicated geometry is included when generating the mould.")
+        self.duplicate_note.setWordWrap(True)
+        self.duplicate_note.setObjectName("mutedText")
+        duplicate_layout.addWidget(self.duplicate_note)
+        transform_layout.addWidget(duplicate_group)
+
         transform_note = QLabel(
-            "Transforms are applied to the original STL before mould generation. "
-            "The model is automatically re-centred and placed on the build plane. "
-            "Applying a new transform clears any previously generated mould so it "
-            "can be regenerated from the updated model.")
+            "Scale, rotation and move offsets are applied before mould generation. "
+            "Duplicate adds a second copy beside the first. Applying changes clears "
+            "any previously generated mould so it can be regenerated from the updated geometry.")
         transform_note.setWordWrap(True)
         transform_note.setObjectName("mutedText")
         transform_layout.addWidget(transform_note)
@@ -1614,15 +1762,42 @@ class MainWindow(QMainWindow):
             f"({total_ml*1.10/1000:,.3f} L)")
 
     def load_stl(self):
-        path,_=QFileDialog.getOpenFileName(self,"Open STL","","STL files (*.stl)")
-        if not path: return
+        path, _ = QFileDialog.getOpenFileName(self, "Add STL", "", "STL files (*.stl)")
+        if not path:
+            return
         try:
-            size=self.generator.load_stl(path)
-            self.source_original_mesh = self.generator.source.copy()
+            mesh = trimesh.load(path, force="mesh")
+            if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+                raise ValueError("The selected STL does not contain a triangle mesh.")
+            mesh.apply_transform(trimesh.transformations.rotation_matrix(-math.pi/2, [1, 0, 0]))
+            mesh.remove_unreferenced_vertices()
+            mesh.fix_normals()
+            mesh.apply_translation([-mesh.bounds.mean(axis=0)[0], -mesh.bounds[0, 1],
+                                     -mesh.bounds.mean(axis=0)[2]])
+            if not mesh.is_watertight:
+                raise ValueError("The uploaded STL is not watertight. Repair it in a mesh tool and retry.")
+            if self.stl_models:
+                existing_max_x = max(float(m.bounds[1, 0]) for m in self.stl_models)
+                mesh.apply_translation([
+                    existing_max_x + max(5.0, float(mesh.extents[0]) * 0.10) - float(mesh.bounds[0, 0]),
+                    0.0, 0.0
+                ])
+            self.stl_models.append(mesh.copy())
+            self.stl_model_visible.append(True)
+            name = os.path.basename(path)
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            self.stl_selection.addItem(item)
+            self.stl_selection.setCurrentRow(self.stl_selection.count() - 1)
+            self.source_filename = name
+            self._rebuild_source_mesh()
             self._set_transform_controls_enabled(True)
-            self.source_filename = os.path.basename(path)
+            self.duplicate_btn.setEnabled(True)
+            self.stl_show_btn.setEnabled(True)
+            self.stl_hide_btn.setEnabled(True)
             self.save_project_btn.setEnabled(True)
-            self.model_info.setText(f"{os.path.basename(path)}\\n{size[0]:.1f} × {size[1]:.1f} × {size[2]:.1f} mm")
+            self.model_info.setText(f"{len(self.stl_models)} STL model(s) loaded · {sum(self.stl_model_visible)} visible")
             self._update_stl_resin_display()
             self.capacity_volume.setText("Silicone gap required: —")
             self.capacity_channel.setText("Pour channel volume: —")
@@ -1633,9 +1808,167 @@ class MainWindow(QMainWindow):
             self.plotter.clear()
             self._add_source_preview()
             self._frame_preview()
-            self.status.setText("STL loaded. Set options, then generate.")
+            self.status.setText(f"Added {name}. Select an STL from the list to edit it.")
         except Exception as e:
-            QMessageBox.critical(self,"STL load failed",str(e))
+            QMessageBox.critical(self, "STL load failed", str(e))
+
+    def _rebuild_source_mesh(self):
+        """Rebuild the mould source from visible STL entries only.
+
+        An empty visible set is valid for preview purposes; generation is
+        disabled until at least one model is shown again.
+        """
+        visible = [
+            mesh.copy()
+            for mesh, shown in zip(self.stl_models, self.stl_model_visible)
+            if shown
+        ]
+        if not visible:
+            self.generator.source = None
+            self.generator.parts = []
+            self.generator.plug = None
+            self.source_original_mesh = None
+            self.generate_btn.setEnabled(False)
+            return
+
+        combined = trimesh.util.concatenate(visible)
+        combined.remove_unreferenced_vertices()
+        combined.fix_normals()
+        self.generator.source = combined
+        self.source_original_mesh = combined.copy()
+        self.generate_btn.setEnabled(True)
+
+    def stl_selection_changed(self, row):
+        enabled = 0 <= row < len(self.stl_models)
+        for button in (self.stl_show_btn, self.stl_hide_btn,
+                       self.stl_delete_selected_btn):
+            button.setEnabled(enabled)
+        self.stl_show_all_btn.setEnabled(bool(self.stl_models))
+        if enabled:
+            shown = self.stl_model_visible[row]
+            self.status.setText(
+                f"Selected: {self.stl_selection.item(row).text()} "
+                f"({'visible' if shown else 'hidden'})"
+            )
+
+    def set_selected_stl_visibility(self, visible):
+        row = self.stl_selection.currentRow()
+        if not 0 <= row < len(self.stl_models):
+            return
+
+        visible = bool(visible)
+        if self.stl_model_visible[row] == visible:
+            return
+
+        self.stl_model_visible[row] = visible
+        item = self.stl_selection.item(row)
+        item.setCheckState(Qt.Checked if visible else Qt.Unchecked)
+
+        # Visibility is per STL entry, not the global "show original" preview
+        # checkbox. Rebuild the source and redraw immediately.
+        self._rebuild_source_mesh()
+        self._refresh_source_scene()
+        self._update_stl_resin_display()
+        self.model_info.setText(
+            f"{len(self.stl_models)} STL model(s) loaded · "
+            f"{sum(self.stl_model_visible)} visible"
+        )
+        if self.generator.source is None:
+            self.status.setText("All STL models are hidden. Show a model to generate a mould.")
+        else:
+            self.status.setText(
+                f"{item.text()} {'shown' if visible else 'hidden'}."
+            )
+
+    def show_all_stls(self):
+        """Make every imported STL visible again."""
+        if not self.stl_models:
+            return
+        self.stl_model_visible = [True] * len(self.stl_models)
+        for row in range(self.stl_selection.count()):
+            self.stl_selection.item(row).setCheckState(Qt.Checked)
+        self._rebuild_source_mesh()
+        self._refresh_source_scene()
+        self._update_stl_resin_display()
+        self.model_info.setText(
+            f"{len(self.stl_models)} STL model(s) loaded · "
+            f"{len(self.stl_models)} visible"
+        )
+        self.status.setText("All STL models are now visible.")
+
+    def delete_selected_stl(self):
+        """Delete only the currently selected STL entry."""
+        row = self.stl_selection.currentRow()
+        if not 0 <= row < len(self.stl_models):
+            return
+
+        name = self.stl_selection.item(row).text()
+        answer = QMessageBox.question(
+            self, "Delete selected STL",
+            f"Delete '{name}' from the project?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        self.stl_models.pop(row)
+        self.stl_model_visible.pop(row)
+        self.stl_selection.takeItem(row)
+
+        # Clear any mould generated from the previous source arrangement.
+        self.generator.parts = []
+        self.generator.plug = None
+        self.generator.profile = None
+        self._rebuild_source_mesh()
+        self._refresh_source_scene()
+        self._update_stl_resin_display()
+
+        has_models = bool(self.stl_models)
+        if has_models:
+            new_row = min(row, len(self.stl_models) - 1)
+            self.stl_selection.setCurrentRow(new_row)
+            self.source_filename = self.stl_selection.item(new_row).text()
+            self._set_transform_controls_enabled(True)
+            self.duplicate_btn.setEnabled(True)
+            self.save_project_btn.setEnabled(True)
+            self.delete_stl_btn.setEnabled(True)
+            self.model_info.setText(
+                f"{len(self.stl_models)} STL model(s) loaded · "
+                f"{sum(self.stl_model_visible)} visible"
+            )
+            self.status.setText(f"Deleted {name}.")
+        else:
+            self.source_filename = None
+            self._set_transform_controls_enabled(False)
+            self.duplicate_btn.setEnabled(False)
+            self.save_project_btn.setEnabled(False)
+            self.delete_stl_btn.setEnabled(False)
+            self.model_info.setText("No model loaded.\\nUpload an STL to get started.")
+            self.status.setText(f"Deleted {name}. No STL models remain.")
+            self.capacity_volume.setText("Silicone gap required: —")
+            self.capacity_channel.setText("Pour channel volume: —")
+            self.capacity_total.setText("Total silicone required: —")
+            self.capacity_extra.setText("Mixing amount (+10%): —")
+
+        self.generate_btn.setEnabled(self.generator.source is not None)
+        self.explode.setValue(0)
+        self.explode_label.setText("0%")
+        self.explode_btn.setEnabled(False)
+        self.explode_btn.setText("EXPLODE MOLD")
+        for button in (self.export_selected, self.export_all,
+                       self.export_exploded, self.export_plug):
+            button.setEnabled(False)
+
+    def _refresh_source_scene(self):
+        self.generator.parts = []
+        self.generator.plug = None
+        self.plotter.clear()
+        self.part_actors = []
+        self.outline_actors = []
+        self.source_actor = None
+        self.source_edge_actor = None
+        self._add_source_preview()
+        self._frame_preview()
 
     def delete_stl(self):
         """Remove the loaded STL and clear any mold generated from it."""
@@ -1651,7 +1984,13 @@ class MainWindow(QMainWindow):
         # Reset all model and generated geometry while preserving the UI settings.
         self.generator = MoldGenerator()
         self.source_original_mesh = None
+        self.stl_models = []
+        self.stl_model_visible = []
+        self.stl_selection.clear()
+        for button in (self.stl_show_btn, self.stl_hide_btn):
+            button.setEnabled(False)
         self._set_transform_controls_enabled(False)
+        self.duplicate_btn.setEnabled(False)
         self.plotter.clear()
         self.source_actor = None
         self.source_edge_actor = None
@@ -1692,82 +2031,79 @@ class MainWindow(QMainWindow):
             widget.setEnabled(bool(enabled))
 
     def apply_model_transform(self):
-        """Apply scale and rotation to a fresh copy of the imported STL."""
-        if self.source_original_mesh is None:
+        """Apply transform controls to the currently selected STL only."""
+        row = self.stl_selection.currentRow()
+        if not 0 <= row < len(self.stl_models):
             return
         try:
-            mesh = self.source_original_mesh.copy()
-            mesh.apply_scale([self.scale_x.value(),
-                              self.scale_y.value(),
-                              self.scale_z.value()])
+            mesh = self.stl_models[row].copy()
+            mesh.apply_scale([self.scale_x.value(), self.scale_y.value(), self.scale_z.value()])
             centre = mesh.bounds.mean(axis=0)
-            for angle, axis in (
-                (self.rotate_x.value(), [1, 0, 0]),
-                (self.rotate_y.value(), [0, 1, 0]),
-                (self.rotate_z.value(), [0, 0, 1]),
-            ):
+            for angle, axis in ((self.rotate_x.value(), [1, 0, 0]),
+                                (self.rotate_y.value(), [0, 1, 0]),
+                                (self.rotate_z.value(), [0, 0, 1])):
                 if abs(angle) > 1e-9:
-                    rotation = trimesh.transformations.rotation_matrix(
-                        math.radians(angle), axis, point=centre)
-                    mesh.apply_transform(rotation)
-
-            # Keep the application's expected coordinate convention:
-            # centred across X/Z with the bottom resting at Y=0.
+                    mesh.apply_transform(trimesh.transformations.rotation_matrix(
+                        math.radians(angle), axis, point=centre))
             mesh.apply_translation([
-                -mesh.bounds.mean(axis=0)[0],
-                -mesh.bounds[0, 1],
-                -mesh.bounds.mean(axis=0)[2]
-            ])
+                -mesh.bounds.mean(axis=0)[0], -mesh.bounds[0, 1],
+                -mesh.bounds.mean(axis=0)[2]])
+            mesh.apply_translation([self.move_x.value(), self.move_y.value(), self.move_z.value()])
             mesh.fix_normals()
             if not mesh.is_watertight:
                 raise ValueError("The transformed STL is no longer watertight.")
-
-            self.generator.source = mesh
+            self.stl_models[row] = mesh
+            self._rebuild_source_mesh()
             self.generator.parts = []
             self.generator.plug = None
             self.generator.profile = None
-            self.generator.lift_y = 0.0
-            self.generator.base_top = 0.0
+            self.generator.lift_y = self.generator.base_top = 0.0
             self.generator.cavity_volume_mm3 = 0.0
             self.generator.pour_channel_volume_mm3 = 0.0
             self.generator.total_resin_volume_mm3 = 0.0
-
-            self.plotter.clear()
-            self.part_actors = []
-            self.outline_actors = []
-            self.source_actor = None
-            self.source_edge_actor = None
-            self.visibility.clear()
-            self._add_source_preview()
-            self._frame_preview()
-            self.model_info.setText(
-                f"{getattr(self, 'source_filename', 'source.stl')}  ·  TRANSFORMED\\n"
-                f"{mesh.extents[0]:.1f} × {mesh.extents[1]:.1f} × "
-                f"{mesh.extents[2]:.1f} mm")
+            self._refresh_source_scene()
             self._update_stl_resin_display()
-            for label, text in (
-                (self.capacity_volume, "Silicone gap required: —"),
-                (self.capacity_channel, "Pour channel volume: —"),
-                (self.capacity_total, "Total silicone required: —"),
-                (self.capacity_extra, "Mixing amount (+10%): —"),
-            ):
-                label.setText(text)
-            for button in (self.export_selected, self.export_all,
-                           self.export_exploded, self.export_plug):
+            for label, value in ((self.capacity_volume, "Silicone gap required: —"),
+                                 (self.capacity_channel, "Pour channel volume: —"),
+                                 (self.capacity_total, "Total silicone required: —"),
+                                 (self.capacity_extra, "Mixing amount (+10%): —")):
+                label.setText(value)
+            for button in (self.export_selected, self.export_all, self.export_exploded, self.export_plug):
                 button.setEnabled(False)
             self.explode_btn.setEnabled(False)
             self.explode.setValue(0)
-            self.status.setText(
-                "STL transform applied. Generate the mould again to use the updated model.")
+            self.status.setText("Selected STL transform applied. Regenerate the mould to update it.")
         except Exception as exc:
             QMessageBox.critical(self, "Transform failed", str(exc))
+
+    def duplicate_model(self):
+        """Duplicate only the currently selected STL model."""
+        row = self.stl_selection.currentRow()
+        if not 0 <= row < len(self.stl_models):
+            return
+        original = self.stl_models[row].copy()
+        duplicate = original.copy()
+        spacing = float(original.extents[0]) + max(5.0, float(original.extents[0]) * 0.10)
+        duplicate.apply_translation([spacing, 0.0, 0.0])
+        self.stl_models.append(duplicate)
+        self.stl_model_visible.append(True)
+        item = QListWidgetItem(f"{self.stl_selection.item(row).text()} (Copy)")
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked)
+        self.stl_selection.addItem(item)
+        self.stl_selection.setCurrentRow(self.stl_selection.count() - 1)
+        self._rebuild_source_mesh()
+        self._refresh_source_scene()
+        self._update_stl_resin_display()
+        self.status.setText("Selected STL duplicated as a separate model.")
 
     def reset_model_transform(self):
         if self.source_original_mesh is None:
             return
         for widget, value in (
             (self.scale_x, 1.0), (self.scale_y, 1.0), (self.scale_z, 1.0),
-            (self.rotate_x, 0), (self.rotate_y, 0), (self.rotate_z, 0)
+            (self.rotate_x, 0), (self.rotate_y, 0), (self.rotate_z, 0),
+            (self.move_x, 0), (self.move_y, 0), (self.move_z, 0)
         ):
             widget.blockSignals(True)
             widget.setValue(value)

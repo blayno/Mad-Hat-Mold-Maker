@@ -7,6 +7,7 @@ If you choose to run it, you do so entirely at your own risk.
 I am not responsible for any damage, malfunction, or personal injury that may result from the use or misuse of this script.
 Use it with caution and at your own discretion.
 
+![Screenshot](Assets/Capture1.PNG)
 
 How to install and run:
 
@@ -41,4 +42,6 @@ BUILD ON WINDOWS
 3. Double-click build_windows.bat and wait for BUILD COMPLETE.
 4. The application folder will be:
    dist\MadHat_Negative_Mold_Generator\
+
+https://github.com/coatl-dev/python3.12-windows Python can be found here
 
