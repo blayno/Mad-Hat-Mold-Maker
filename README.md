@@ -1,20 +1,12 @@
 ![Screenshot](Assets/Capture.PNG)
-
-
-This is an experimental Script written mostly with Chat GPT 
-IMPORTANT DISCLAIMER: This is my personal project and has only been tested by me
-If you choose to run it, you do so entirely at your own risk. 
-I am not responsible for any damage, malfunction, or personal injury that may result from the use or misuse of this script.
-Use it with caution and at your own discretion.
-
 ![Screenshot](Assets/Capture1.PNG)
 
 How to install and run:
 
 Beginners :
 Install Python 3.12 and add python to path during installation.
-Download code as zip(Green code button).
-Move downloaded files to a seperate folder named "Mold Generator"
+Download code as zip(Green code button above).
+Unzip and move downloaded folder to the Desktop
 Open CMD,
 Copy folder location from the windows folder search bar,
 Type into CMD: "cd & folder location" replacing "& folder location" with your copied folder location, press enter.
@@ -34,7 +26,26 @@ or double click the python file
 
 
 
+Standalone Version
+BUILD ON WINDOWS
+----------------
+1. Use 64-bit Python 3.12 and enable the Python Launcher.
+2. Extract this entire ZIP into a normal folder.
+3. Double-click build_windows.bat and wait for BUILD COMPLETE.
+4. The application folder will be:
+   dist\MadHat_Negative_Mold_Generator\
 
 
-https://github.com/coatl-dev/python3.12-windows Python can be found here
+
+
+Python can be found here
+https://github.com/coatl-dev/python3.12-windows 
+
+
+
+This is an experimental Script written mostly with Chat GPT 
+IMPORTANT DISCLAIMER: This is my personal project and has only been tested by me
+If you choose to run it, you do so entirely at your own risk. 
+I am not responsible for any damage, malfunction, or personal injury that may result from the use or misuse of this script.
+Use it with caution and at your own discretion.
 
