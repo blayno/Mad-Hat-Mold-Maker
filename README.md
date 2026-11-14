@@ -6,10 +6,9 @@ How to install and run:
 Beginners :
 Install Python 3.12 and add python to path during installation.
 Download code as zip(Green code button above).
-Unzip and move downloaded folder to the Desktop
-Open CMD,
+Unzip and move downloaded folder to the Desktop and open the folder so you see all files
 Copy folder location from the windows folder search bar,
-Type into CMD: "cd & folder location" replacing "& folder location" with your copied folder location, press enter.
+Open & type into CMD: "cd & folder location" replacing "& folder location" with your copied folder location, press enter.
 Copy and paste into CMD: pip install -r requirements_MadHat_Mold_Generator.txt, press enter.
 
 
