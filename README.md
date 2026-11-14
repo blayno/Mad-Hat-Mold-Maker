@@ -15,9 +15,9 @@ Beginners :
 Install Python 3.12 and add python to path during installation.
 Download both files.
 Move downloaded files to a seperate folder named "Mold Generator"
-Open CMD
-Copy folder location from the windows folder search bar
-Type into CMD: "cd & folder location" replacing "& folder location" with your pasted folder location
+Open CMD,
+Copy folder location from the windows folder search bar,
+Type into CMD: "cd & folder location" replacing "& folder location" with your copied folder location
 Copy and paste into CMD: pip install -r requirements_MadHat_Mold_Generator.txt 
 
 
