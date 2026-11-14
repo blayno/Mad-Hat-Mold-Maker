@@ -40,6 +40,9 @@ BUILD ON WINDOWS
 Python can be found here
 https://github.com/coatl-dev/python3.12-windows 
 
+files that arent watertight and need repair
+https://3dbuilder.org/
+
 
 
 This is an experimental Script written mostly with Chat GPT 
