@@ -12,7 +12,7 @@ Use it with caution and at your own discretion.
 How to install and run:
 
 Beginners
-Install Python 3.13 and add python to path during installation.
+Install Python 3.12 and add python to path during installation.
 Download both files.
 Move downloaded files to a seperate folder named "Mold Generator"
 Open CMD
