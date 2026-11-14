@@ -13,12 +13,12 @@ How to install and run:
 
 Beginners :
 Install Python 3.12 and add python to path during installation.
-Download both files.
+Download code as zip(Green code button).
 Move downloaded files to a seperate folder named "Mold Generator"
 Open CMD,
 Copy folder location from the windows folder search bar,
-Type into CMD: "cd & folder location" replacing "& folder location" with your copied folder location
-Copy and paste into CMD: pip install -r requirements_MadHat_Mold_Generator.txt 
+Type into CMD: "cd & folder location" replacing "& folder location" with your copied folder location, press enter.
+Copy and paste into CMD: pip install -r requirements_MadHat_Mold_Generator.txt, press enter.
 
 
 Pros :
@@ -29,7 +29,7 @@ Run: pip install -r requirements_MadHat_Mold_Generator.txt
 
 
 Run the application :
-Copy and paste into CMD: python MadHat_Negative_Mold_Generator.py
+Copy and paste into CMD: python MadHat_Negative_Mold_Generator.py, press enter.
 or double click the python file
 
 
